@@ -126,6 +126,165 @@ describe("registerCreativeTools", () => {
   });
 
   describe("ads_create_ad_creative handler", () => {
+    it("builds a lead form creative CTA with lead_gen_form_id instead of link", async () => {
+      const server = createMockMcpServer();
+      registerCreativeTools(server as never);
+
+      vi.stubGlobal(
+        "fetch",
+        vi.fn()
+          .mockResolvedValueOnce(mockFetchResponse({ id: "1163008143558386" }))
+          .mockResolvedValueOnce(mockFetchResponse({
+            id: "1163008143558386",
+            effective_object_story_id: "274987155692527_99",
+          })),
+      );
+
+      const handler = server._registeredTools[2].handler;
+      await handler({
+        account_id: "act_1334580334781554",
+        name: "TEST_LeadForm_MCP",
+        page_id: "274987155692527",
+        image_hash: "c261d2f13bbb2625fa0e7b4e1c3194a6",
+        image_url: undefined,
+        video_id: undefined,
+        link_url: "http://fb.me/",
+        message: "test",
+        headline: "Xem demo Easy AI",
+        description: "AI chatbot cho ban le & TMDT",
+        call_to_action_type: "SIGN_UP",
+        lead_gen_form_id: "1004717422080177",
+        instagram_actor_id: undefined,
+        object_story_id: undefined,
+        source_instagram_media_id: undefined,
+        url_tags: undefined,
+      });
+
+      const body = vi.mocked(fetch).mock.calls[0][1]?.body;
+      const params = new URLSearchParams(body as string);
+      const objectStorySpec = JSON.parse(params.get("object_story_spec") ?? "{}") as {
+        link_data?: {
+          link?: string;
+          call_to_action?: {
+            type?: string;
+            value?: {
+              link?: string;
+              lead_gen_form_id?: string;
+            };
+          };
+        };
+      };
+
+      expect(objectStorySpec.link_data?.link).toBe("http://fb.me/");
+      expect(objectStorySpec.link_data?.call_to_action).toEqual({
+        type: "SIGN_UP",
+        value: { lead_gen_form_id: "1004717422080177" },
+      });
+      expect(objectStorySpec.link_data?.call_to_action?.value?.link).toBeUndefined();
+    });
+
+    it("defaults lead form creative link and CTA type when omitted", async () => {
+      const server = createMockMcpServer();
+      registerCreativeTools(server as never);
+
+      vi.stubGlobal(
+        "fetch",
+        vi.fn()
+          .mockResolvedValueOnce(mockFetchResponse({ id: "1163008143558386" }))
+          .mockResolvedValueOnce(mockFetchResponse({ id: "1163008143558386" })),
+      );
+
+      const handler = server._registeredTools[2].handler;
+      await handler({
+        account_id: "act_1334580334781554",
+        name: "TEST_LeadForm_Defaults",
+        page_id: "274987155692527",
+        image_hash: "c261d2f13bbb2625fa0e7b4e1c3194a6",
+        image_url: undefined,
+        video_id: undefined,
+        link_url: undefined,
+        message: "test",
+        headline: "Xem demo Easy AI",
+        description: "AI chatbot cho ban le & TMDT",
+        call_to_action_type: undefined,
+        lead_gen_form_id: "1004717422080177",
+        instagram_actor_id: undefined,
+        object_story_id: undefined,
+        source_instagram_media_id: undefined,
+        url_tags: undefined,
+      });
+
+      const body = vi.mocked(fetch).mock.calls[0][1]?.body;
+      const params = new URLSearchParams(body as string);
+      const objectStorySpec = JSON.parse(params.get("object_story_spec") ?? "{}") as {
+        link_data?: {
+          link?: string;
+          call_to_action?: {
+            type?: string;
+            value?: { lead_gen_form_id?: string };
+          };
+        };
+      };
+
+      expect(objectStorySpec.link_data?.link).toBe("http://fb.me/");
+      expect(objectStorySpec.link_data?.call_to_action).toEqual({
+        type: "SIGN_UP",
+        value: { lead_gen_form_id: "1004717422080177" },
+      });
+    });
+
+    it("keeps website creative CTA link behavior without lead_gen_form_id", async () => {
+      const server = createMockMcpServer();
+      registerCreativeTools(server as never);
+
+      vi.stubGlobal(
+        "fetch",
+        vi.fn()
+          .mockResolvedValueOnce(mockFetchResponse({ id: "40123" }))
+          .mockResolvedValueOnce(mockFetchResponse({ id: "40123" })),
+      );
+
+      const handler = server._registeredTools[2].handler;
+      await handler({
+        account_id: "act_123",
+        name: "Website Creative",
+        page_id: "6001",
+        image_hash: "abc123",
+        image_url: undefined,
+        video_id: undefined,
+        link_url: "https://example.com",
+        message: "test",
+        headline: "Headline",
+        description: "Description",
+        call_to_action_type: "LEARN_MORE",
+        lead_gen_form_id: undefined,
+        instagram_actor_id: undefined,
+        object_story_id: undefined,
+        source_instagram_media_id: undefined,
+        url_tags: undefined,
+      });
+
+      const body = vi.mocked(fetch).mock.calls[0][1]?.body;
+      const params = new URLSearchParams(body as string);
+      const objectStorySpec = JSON.parse(params.get("object_story_spec") ?? "{}") as {
+        link_data?: {
+          call_to_action?: {
+            type?: string;
+            value?: {
+              link?: string;
+              lead_gen_form_id?: string;
+            };
+          };
+        };
+      };
+
+      expect(objectStorySpec.link_data?.call_to_action).toEqual({
+        type: "LEARN_MORE",
+        value: { link: "https://example.com" },
+      });
+      expect(objectStorySpec.link_data?.call_to_action?.value?.lead_gen_form_id).toBeUndefined();
+    });
+
     it("fails locally when a scratch video creative is missing thumbnail data", async () => {
       const server = createMockMcpServer();
       registerCreativeTools(server as never);

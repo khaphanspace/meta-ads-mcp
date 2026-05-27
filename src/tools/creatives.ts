@@ -169,7 +169,7 @@ export function registerCreativeTools(server: McpServer): void {
   server.registerTool(
     "ads_create_ad_creative",
     {
-      description: `${WRITE_WARNING}Create a new ad creative. Three modes: (1) Build from scratch with image/video + text via object_story_spec, (2) Promote an existing Facebook Page post via object_story_id ('Boost Post'), (3) Promote an existing Instagram post via source_instagram_media_id. The creative can then be used when creating ads. Important: scratch-built video creatives require a thumbnail via image_hash or image_url; Meta rejects video_id without one.`,
+      description: `${WRITE_WARNING}Create a new ad creative. Three modes: (1) Build from scratch with image/video + text via object_story_spec, (2) Promote an existing Facebook Page post via object_story_id ('Boost Post'), (3) Promote an existing Instagram post via source_instagram_media_id. The creative can then be used when creating ads. Important: scratch-built video creatives require a thumbnail via image_hash or image_url; Meta rejects video_id without one. For Meta instant lead form ads, pass lead_gen_form_id and use link_url=http://fb.me/ or omit link_url to default to http://fb.me/.`,
       inputSchema: {
         account_id: z.string().describe("Ad account ID"),
         name: z.string().min(1).describe("Creative name"),
@@ -185,6 +185,7 @@ export function registerCreativeTools(server: McpServer): void {
         headline: z.string().optional().describe("Headline text"),
         description: z.string().optional().describe("Description text (shown below headline)"),
         call_to_action_type: ctaEnum.optional().describe("Call-to-action button type"),
+        lead_gen_form_id: z.string().optional().describe("Meta instant form ID for lead form ads. When provided, CTA value uses lead_gen_form_id instead of link; link_url defaults to http://fb.me/ if omitted."),
         url_tags: z.string().optional().describe("Query string params appended to URLs clicked from the ad (e.g. 'utm_source=meta&utm_medium=paid')"),
       },
       annotations: { ...CREATE },
@@ -192,7 +193,7 @@ export function registerCreativeTools(server: McpServer): void {
     async ({
       account_id, name, page_id, object_story_id, instagram_actor_id, source_instagram_media_id,
       image_hash, image_url, video_id, link_url, message, headline, description,
-      call_to_action_type, url_tags,
+      call_to_action_type, lead_gen_form_id, url_tags,
     }) => {
       const accountPath = normalizeAccountId(account_id);
       const pageIdValidated = page_id ? validateMetaId(page_id, "page") : undefined;
@@ -207,6 +208,9 @@ export function registerCreativeTools(server: McpServer): void {
         : undefined;
       const videoIdValidated = video_id
         ? validateMetaId(video_id, "video")
+        : undefined;
+      const leadGenFormIdValidated = lead_gen_form_id
+        ? validateMetaId(lead_gen_form_id, "lead_gen_form")
         : undefined;
 
       const body: Record<string, string | number | boolean> = { name };
@@ -260,11 +264,20 @@ export function registerCreativeTools(server: McpServer): void {
           const linkData: Record<string, unknown> = {};
           if (image_hash) linkData.image_hash = image_hash;
           if (image_url && !image_hash) linkData.picture = image_url;
-          if (link_url) linkData.link = link_url;
+          if (leadGenFormIdValidated) {
+            linkData.link = link_url ?? "http://fb.me/";
+          } else if (link_url) {
+            linkData.link = link_url;
+          }
           if (message) linkData.message = message;
           if (headline) linkData.name = headline;
           if (description) linkData.description = description;
-          if (call_to_action_type) {
+          if (leadGenFormIdValidated) {
+            linkData.call_to_action = {
+              type: call_to_action_type ?? "SIGN_UP",
+              value: { lead_gen_form_id: leadGenFormIdValidated },
+            };
+          } else if (call_to_action_type) {
             linkData.call_to_action = {
               type: call_to_action_type,
               value: link_url ? { link: link_url } : undefined,

@@ -119,7 +119,12 @@ export function registerPreviewTools(server: McpServer): void {
                     call_to_action: z
                       .object({
                         type: z.string(),
-                        value: z.object({ link: z.string().optional() }).optional(),
+                        value: z
+                          .object({
+                            link: z.string().optional(),
+                            lead_gen_form_id: z.string().optional(),
+                          })
+                          .optional(),
                       })
                       .optional(),
                   })
@@ -134,7 +139,12 @@ export function registerPreviewTools(server: McpServer): void {
                     call_to_action: z
                       .object({
                         type: z.string(),
-                        value: z.object({ link: z.string().optional() }).optional(),
+                        value: z
+                          .object({
+                            link: z.string().optional(),
+                            lead_gen_form_id: z.string().optional(),
+                          })
+                          .optional(),
                       })
                       .optional(),
                   })
