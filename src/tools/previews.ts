@@ -127,6 +127,26 @@ export function registerPreviewTools(server: McpServer): void {
                           .optional(),
                       })
                       .optional(),
+                    child_attachments: z
+                      .array(z.object({
+                        image_hash: z.string().optional(),
+                        picture: z.string().optional().describe("Image URL"),
+                        link: z.string().optional().describe("Destination URL"),
+                        name: z.string().optional().describe("Headline"),
+                        description: z.string().optional(),
+                        call_to_action: z
+                          .object({
+                            type: z.string(),
+                            value: z
+                              .object({
+                                link: z.string().optional(),
+                                lead_gen_form_id: z.string().optional(),
+                              })
+                              .optional(),
+                          })
+                          .optional(),
+                      }))
+                      .optional(),
                   })
                   .optional(),
                 video_data: z

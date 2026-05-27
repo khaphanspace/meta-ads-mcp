@@ -179,6 +179,20 @@ export function registerCreativeTools(server: McpServer): void {
         source_instagram_media_id: z.string().optional().describe("Instagram media ID to create a creative from an existing IG post (from ads_get_instagram_media). When provided, image_hash/image_url/video_id are ignored."),
         image_hash: z.string().optional().describe("Image hash from ads_upload_ad_image"),
         image_url: z.string().optional().describe("Image URL (alternative to image_hash)"),
+        child_attachments: z
+          .array(z.object({
+            image_hash: z.string().optional().describe("Carousel card image hash from ads_upload_ad_image"),
+            image_url: z.string().optional().describe("Carousel card image URL (alternative to image_hash)"),
+            link_url: z.string().optional().describe("Carousel card destination URL"),
+            headline: z.string().optional().describe("Carousel card headline"),
+            description: z.string().optional().describe("Carousel card description"),
+            call_to_action_type: ctaEnum.optional().describe("Carousel card CTA type"),
+            lead_gen_form_id: z.string().optional().describe("Carousel card Meta instant form ID. Uses CTA value.lead_gen_form_id instead of value.link."),
+          }))
+          .min(2)
+          .max(10)
+          .optional()
+          .describe("Carousel cards for link_data.child_attachments. Provide 2-10 cards. Each card can use image_hash or image_url; lead form cards can pass lead_gen_form_id."),
         video_id: z.string().optional().describe("Video ID"),
         link_url: z.string().optional().describe("Destination URL"),
         message: z.string().optional().describe("Primary text / body copy"),
@@ -192,7 +206,7 @@ export function registerCreativeTools(server: McpServer): void {
     },
     async ({
       account_id, name, page_id, object_story_id, instagram_actor_id, source_instagram_media_id,
-      image_hash, image_url, video_id, link_url, message, headline, description,
+      image_hash, image_url, child_attachments, video_id, link_url, message, headline, description,
       call_to_action_type, lead_gen_form_id, url_tags,
     }) => {
       const accountPath = normalizeAccountId(account_id);
@@ -245,6 +259,20 @@ export function registerCreativeTools(server: McpServer): void {
             throw err;
           }
         }
+        if (child_attachments) {
+          for (const attachment of child_attachments) {
+            if (attachment.image_url && !attachment.image_hash) {
+              try {
+                await assertSafePublicUrl(attachment.image_url);
+              } catch (err) {
+                if (err instanceof UnsafeUrlError) {
+                  throw new Error(`Refusing to forward child_attachments.image_url to Meta: ${err.message}`);
+                }
+                throw err;
+              }
+            }
+          }
+        }
         const objectStorySpec: Record<string, unknown> = { page_id: pageIdValidated };
 
         if (videoIdValidated) {
@@ -264,10 +292,14 @@ export function registerCreativeTools(server: McpServer): void {
           const linkData: Record<string, unknown> = {};
           if (image_hash) linkData.image_hash = image_hash;
           if (image_url && !image_hash) linkData.picture = image_url;
+          const defaultLeadFormLink = leadGenFormIdValidated
+            || child_attachments?.some((attachment) => attachment.lead_gen_form_id);
           if (leadGenFormIdValidated) {
             linkData.link = link_url ?? "http://fb.me/";
           } else if (link_url) {
             linkData.link = link_url;
+          } else if (defaultLeadFormLink) {
+            linkData.link = "http://fb.me/";
           }
           if (message) linkData.message = message;
           if (headline) linkData.name = headline;
@@ -282,6 +314,34 @@ export function registerCreativeTools(server: McpServer): void {
               type: call_to_action_type,
               value: link_url ? { link: link_url } : undefined,
             };
+          }
+          if (child_attachments) {
+            linkData.child_attachments = child_attachments.map((attachment) => {
+              const attachmentLeadGenFormId = attachment.lead_gen_form_id
+                ? validateMetaId(attachment.lead_gen_form_id, "lead_gen_form")
+                : undefined;
+              const attachmentLink = attachmentLeadGenFormId
+                ? attachment.link_url ?? "http://fb.me/"
+                : attachment.link_url ?? link_url;
+              const childAttachment: Record<string, unknown> = {};
+              if (attachment.image_hash) childAttachment.image_hash = attachment.image_hash;
+              if (attachment.image_url && !attachment.image_hash) childAttachment.picture = attachment.image_url;
+              if (attachmentLink) childAttachment.link = attachmentLink;
+              if (attachment.headline) childAttachment.name = attachment.headline;
+              if (attachment.description) childAttachment.description = attachment.description;
+              if (attachmentLeadGenFormId) {
+                childAttachment.call_to_action = {
+                  type: attachment.call_to_action_type ?? call_to_action_type ?? "SIGN_UP",
+                  value: { lead_gen_form_id: attachmentLeadGenFormId },
+                };
+              } else if (attachment.call_to_action_type || call_to_action_type) {
+                childAttachment.call_to_action = {
+                  type: attachment.call_to_action_type ?? call_to_action_type,
+                  value: attachmentLink ? { link: attachmentLink } : undefined,
+                };
+              }
+              return childAttachment;
+            });
           }
           objectStorySpec.link_data = linkData;
         }

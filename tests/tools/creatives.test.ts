@@ -285,6 +285,176 @@ describe("registerCreativeTools", () => {
       expect(objectStorySpec.link_data?.call_to_action?.value?.lead_gen_form_id).toBeUndefined();
     });
 
+    it("builds website carousel child_attachments with CTA links", async () => {
+      const server = createMockMcpServer();
+      registerCreativeTools(server as never);
+
+      vi.stubGlobal(
+        "fetch",
+        vi.fn()
+          .mockResolvedValueOnce(mockFetchResponse({ id: "40124" }))
+          .mockResolvedValueOnce(mockFetchResponse({ id: "40124" })),
+      );
+
+      const handler = server._registeredTools[2].handler;
+      await handler({
+        account_id: "act_123",
+        name: "Website Carousel",
+        page_id: "6001",
+        image_hash: undefined,
+        image_url: undefined,
+        child_attachments: [
+          {
+            image_hash: "hash1",
+            link_url: "https://example.com/one",
+            headline: "Card One",
+            description: "First card",
+            call_to_action_type: "LEARN_MORE",
+            lead_gen_form_id: undefined,
+          },
+          {
+            image_hash: "hash2",
+            link_url: "https://example.com/two",
+            headline: "Card Two",
+            description: "Second card",
+            call_to_action_type: "SHOP_NOW",
+            lead_gen_form_id: undefined,
+          },
+        ],
+        video_id: undefined,
+        link_url: "https://example.com",
+        message: "carousel",
+        headline: undefined,
+        description: undefined,
+        call_to_action_type: undefined,
+        lead_gen_form_id: undefined,
+        instagram_actor_id: undefined,
+        object_story_id: undefined,
+        source_instagram_media_id: undefined,
+        url_tags: undefined,
+      });
+
+      const body = vi.mocked(fetch).mock.calls[0][1]?.body;
+      const params = new URLSearchParams(body as string);
+      const objectStorySpec = JSON.parse(params.get("object_story_spec") ?? "{}") as {
+        link_data?: {
+          link?: string;
+          child_attachments?: Array<{
+            image_hash?: string;
+            link?: string;
+            name?: string;
+            description?: string;
+            call_to_action?: {
+              type?: string;
+              value?: { link?: string; lead_gen_form_id?: string };
+            };
+          }>;
+        };
+      };
+
+      expect(objectStorySpec.link_data?.link).toBe("https://example.com");
+      expect(objectStorySpec.link_data?.child_attachments).toEqual([
+        {
+          image_hash: "hash1",
+          link: "https://example.com/one",
+          name: "Card One",
+          description: "First card",
+          call_to_action: {
+            type: "LEARN_MORE",
+            value: { link: "https://example.com/one" },
+          },
+        },
+        {
+          image_hash: "hash2",
+          link: "https://example.com/two",
+          name: "Card Two",
+          description: "Second card",
+          call_to_action: {
+            type: "SHOP_NOW",
+            value: { link: "https://example.com/two" },
+          },
+        },
+      ]);
+    });
+
+    it("builds lead form carousel child_attachments without CTA links", async () => {
+      const server = createMockMcpServer();
+      registerCreativeTools(server as never);
+
+      vi.stubGlobal(
+        "fetch",
+        vi.fn()
+          .mockResolvedValueOnce(mockFetchResponse({ id: "40125" }))
+          .mockResolvedValueOnce(mockFetchResponse({ id: "40125" })),
+      );
+
+      const handler = server._registeredTools[2].handler;
+      await handler({
+        account_id: "act_123",
+        name: "Lead Form Carousel",
+        page_id: "6001",
+        image_hash: undefined,
+        image_url: undefined,
+        child_attachments: [
+          {
+            image_hash: "hash1",
+            link_url: undefined,
+            headline: "Card One",
+            description: "First card",
+            call_to_action_type: undefined,
+            lead_gen_form_id: "1004717422080177",
+          },
+          {
+            image_hash: "hash2",
+            link_url: undefined,
+            headline: "Card Two",
+            description: "Second card",
+            call_to_action_type: "SIGN_UP",
+            lead_gen_form_id: "1004717422080178",
+          },
+        ],
+        video_id: undefined,
+        link_url: undefined,
+        message: "carousel",
+        headline: undefined,
+        description: undefined,
+        call_to_action_type: undefined,
+        lead_gen_form_id: undefined,
+        instagram_actor_id: undefined,
+        object_story_id: undefined,
+        source_instagram_media_id: undefined,
+        url_tags: undefined,
+      });
+
+      const body = vi.mocked(fetch).mock.calls[0][1]?.body;
+      const params = new URLSearchParams(body as string);
+      const objectStorySpec = JSON.parse(params.get("object_story_spec") ?? "{}") as {
+        link_data?: {
+          link?: string;
+          child_attachments?: Array<{
+            link?: string;
+            call_to_action?: {
+              type?: string;
+              value?: { link?: string; lead_gen_form_id?: string };
+            };
+          }>;
+        };
+      };
+
+      expect(objectStorySpec.link_data?.link).toBe("http://fb.me/");
+      expect(objectStorySpec.link_data?.child_attachments?.[0]?.link).toBe("http://fb.me/");
+      expect(objectStorySpec.link_data?.child_attachments?.[0]?.call_to_action).toEqual({
+        type: "SIGN_UP",
+        value: { lead_gen_form_id: "1004717422080177" },
+      });
+      expect(objectStorySpec.link_data?.child_attachments?.[0]?.call_to_action?.value?.link).toBeUndefined();
+      expect(objectStorySpec.link_data?.child_attachments?.[1]?.call_to_action).toEqual({
+        type: "SIGN_UP",
+        value: { lead_gen_form_id: "1004717422080178" },
+      });
+      expect(objectStorySpec.link_data?.child_attachments?.[1]?.call_to_action?.value?.link).toBeUndefined();
+    });
+
     it("fails locally when a scratch video creative is missing thumbnail data", async () => {
       const server = createMockMcpServer();
       registerCreativeTools(server as never);
