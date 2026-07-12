@@ -2,14 +2,13 @@ name: Sync fork from upstream
 
 on:
   schedule:
-    - cron: "0 18 * * *"
+    - cron: "17 18 * * *"
   workflow_dispatch:
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    permissions: {}
     steps:
       - name: Merge upstream into main
         env:
