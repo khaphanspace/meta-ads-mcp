@@ -11,35 +11,12 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Sync main from byadsco/main, preserve this workflow
+      - name: Merge upstream into main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
-          cp .github/workflows/sync-upstream.yml /tmp/sync-upstream.yml
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git remote add upstream https://github.com/byadsco/meta-ads-mcp.git
-          git fetch upstream main
-
-          UPSTREAM_SHA=$(git rev-parse upstream/main)
-          MERGE_BASE=$(git merge-base upstream/main HEAD)
-
-          if [ "$MERGE_BASE" = "$UPSTREAM_SHA" ]; then
-            echo "::notice::Already up to date with upstream/main ($UPSTREAM_SHA)"
-            exit 0
-          fi
-
-          git reset --hard upstream/main
-          mkdir -p .github/workflows
-          cp /tmp/sync-upstream.yml .github/workflows/sync-upstream.yml
-          git add .github/workflows/sync-upstream.yml
-          git commit -m "ci: re-apply sync-upstream workflow [skip ci]"
-          git push --force-with-lease origin main
-
-          echo "::notice::Synced fork main to upstream $UPSTREAM_SHA"
+          gh api --method POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/${GITHUB_REPOSITORY}/merge-upstream" \
+            -f branch=main
