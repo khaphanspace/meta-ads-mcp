@@ -49,14 +49,14 @@ export function registerAllTools(server: McpServer): void {
 
   // ─── Extended Features ──────────────────────────────────
   registerLeadTools(server);         // 4 tools — Lead forms & lead download
-  registerAudienceTools(server);     // 5 tools — Custom & lookalike audiences
+  registerAudienceTools(server);     // 8 tools — Custom & lookalike audiences (+ share/unshare/get-shared-accounts)
   registerPreviewTools(server);      // 2 tools — Ad preview links
   registerPixelTools(server);        // 5 tools — Pixel & events manager
   registerCommentTools(server);      // 4 tools — Ad comment moderation
   registerRuleTools(server);         // 5 tools — Automated rules
   registerABTestingTools(server);    // 3 tools — A/B split testing
   registerReportTools(server);       // 4 tools — Async scheduled reports (+ run_and_wait)
-  registerBillingTools(server);      // 3 tools — Billing & spend limits
+  registerBillingTools(server);      // 4 tools — Billing, spend limits & invoices
   registerRateStatusTools(server);   // 1 tool — Rate-limit usage + circuit status
 
   // ─── Diagnostics & Help ─────────────────────────────────
@@ -72,5 +72,5 @@ export function registerAllTools(server: McpServer): void {
   // ─── Token Management ────────────────────────────────────
   registerTokenTools(server);        // 4 tools — list / set-active / register / delete
 
-  // Total: 92 tools (79 renamed + 13 new in v3)
+  // Total: 97 tools (79 renamed + 14 new in v3 + 3 audience-sharing + 1 invoices)
 }

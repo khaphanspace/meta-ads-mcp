@@ -5,6 +5,62 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`ads_get_invoices`** — read a business's invoices via Meta's
+  `GET /{business_id}/business_invoices` edge, returning each invoice's amount,
+  billing period, payment status, and PDF download link (`download_uri` /
+  `cdn_download_uri`). Accepts a `business_id` directly or an `account_id`
+  (the owning business is resolved automatically), plus optional `start_date` /
+  `end_date` / `invoice_id` / `type` (`CM` / `DM` / `INV` / `PRO_FORMA`)
+  filters. Annotated `READ`. Meta only exposes invoices for businesses on a
+  credit line / monthly invoicing and requires a token with the
+  `FINANCE_EDITOR` or `FINANCE_ANALYST` role; the tool returns a clear
+  explanatory message for card-billed accounts that have no API invoices.
+  Tool count: 96 → 97.
+
+## [3.2.1] — 2026-06-04
+
+Documentation and validation hardening. No new tools — tool count stays at 96.
+
+### Fixed
+
+- **`ads_delete_custom_audience`** now validates Meta's response and throws
+  when the API does not confirm `success: true`, instead of reporting a
+  false positive on any 2xx body. Brings it in line with the
+  `ads_share_custom_audience` / `ads_unshare_custom_audience` write tools
+  added in 3.2.0.
+- **Docs**: README tool count corrected from `93` to `96` (TOC, comparison
+  table, features list, and the `Tools` section heading) to match the actual
+  registered tool count and the 3.2.0 CHANGELOG.
+
+### Changed
+
+- **Dev dependencies**: lockfile refreshed (vitest/vite toolchain moved from
+  `rollup` to `rolldown` bindings). No runtime/production dependency changes.
+
+Cross-account custom-audience sharing. Meta exposes audience sharing via
+`POST /{audience_id}/adaccounts` but the MCP had no tool for it — agencies
+managing several ad accounts under one Business Manager could create an
+audience but not lend it to a sibling account without leaving the assistant.
+
+### Added
+
+- **`ads_share_custom_audience`** — share a custom audience with one or more
+  ad accounts in the same Business Manager (`POST /{audience_id}/adaccounts`).
+  Accepts numeric or `act_`-prefixed account ids and an optional
+  `relationship_type`. Annotated `UPDATE` (idempotent: re-sharing is a no-op).
+- **`ads_unshare_custom_audience`** — revoke a share from one or more accounts
+  (`DELETE /{audience_id}/adaccounts`). The audience itself is untouched.
+- **`ads_get_audience_shared_accounts`** — list the accounts that currently
+  have shared access to an audience (`GET /{audience_id}/adaccounts`).
+
+Both write tools validate Meta's response and fail loudly when the API does
+not confirm `success: true`, instead of reporting a false positive on any
+2xx body. Tool count: 93 → 96.
+
 ## [3.1.0] — 2026-05-13
 
 Audit-driven fixes for `ads_clone_ad_set_bundle` after Meta API error
