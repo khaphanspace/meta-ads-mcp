@@ -7,8 +7,56 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [3.4.1] — 2026-07-22
+
+### Security
+
+- **`npm audit` clean — 0 vulnerabilities.** Bumped `tsx` 4.21.0 → 4.23.1 and
+  `vitest` 4.1.8 → 4.1.10, pulling `esbuild` 0.28.1 (GHSA-g7r4-m6w7-qqqr,
+  dev-only arbitrary file read via dev server on Windows). Added an npm
+  override forcing `@hono/node-server` ^2.0.5 (resolved 2.0.11) inside
+  `@modelcontextprotocol/sdk`, fixing GHSA-frvp-7c67-39w9 (path traversal in
+  `serve-static` on Windows via encoded backslash). Full test suite, build,
+  and an HTTP-transport smoke test pass with the override.
+
+### Changed
+
+- **`ads_create_ad_set` budget guidance** (#97, thanks @gitlares) — the tool
+  description no longer claims a budget is required. It now documents that
+  budget belongs at exactly one level: omit both ad-set budget fields when the
+  parent campaign owns a daily/lifetime budget (CBO), and only pass them for
+  ABO campaigns. `daily_budget` / `lifetime_budget` field descriptions updated
+  to match, plus a regression test proving omitted budget fields are not sent
+  to Meta.
+
+## [3.4.0] — 2026-07-22
+
 ### Added
 
+- **WhatsApp Business management (27 new `whatsapp_*` tools)** — full
+  management surface for the WhatsApp Business Platform via the Graph API,
+  in four new modules:
+  - `src/tools/whatsapp.ts` (8): WABA discovery
+    (`whatsapp_get_business_accounts`, with automatic `/me/businesses`
+    scanning), phone number list/details, register/deregister,
+    request/verify ownership code, and business profile get/update.
+  - `src/tools/whatsapp-templates.ts` (6): message template CRUD
+    (`whatsapp_get_templates`, `whatsapp_create_template`,
+    `whatsapp_update_template`, `whatsapp_delete_template`) plus WABA
+    analytics (`whatsapp_get_analytics` — MESSAGING / CONVERSATION /
+    PRICING families) and `whatsapp_get_template_analytics`.
+  - `src/tools/whatsapp-flows.ts` (6): WhatsApp Flows lifecycle — list,
+    create (inline Flow JSON), update (metadata + Flow JSON asset upload),
+    publish, deprecate (irreversible), delete (drafts only).
+  - `src/tools/whatsapp-config.ts` (7): QR code deep links
+    (`message_qrdls` CRUD) and webhook subscription management
+    (`subscribed_apps` get/subscribe/unsubscribe). No webhook receiver
+    endpoint is included — events go to the Meta App's configured webhook.
+  Message sending and media upload are intentionally out of scope.
+  The OAuth flow now requests the `whatsapp_business_management` scope;
+  previously issued tokens must re-authorize before `whatsapp_*` tools work.
+  `MetaApiClient.delete()` now accepts optional query params (needed for
+  template deletion by name). Tool count: 97 → 124.
 - **`ads_get_invoices`** — read a business's invoices via Meta's
   `GET /{business_id}/business_invoices` edge, returning each invoice's amount,
   billing period, payment status, and PDF download link (`download_uri` /
