@@ -7,6 +7,177 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+- **Apify tokens are now managed from the web UI**, not only by invoking
+  `ads_library_register_apify_token`. Asking an assistant to register a
+  credential was the only path, which is a poor fit for something users expect
+  to find next to their Meta tokens.
+  - A new **`GET /auth/connections`** page, authenticated and available at any
+    time, lists the stored Meta tokens (with the ability to switch the active
+    one) and the Apify connection, and allows registering, replacing or
+    disconnecting the Apify token. This is the page that solves rotation — the
+    consent screen only renders inside an OAuth flow, so it could never be
+    reached again after the initial approval.
+  - An **Apify section on the consent page** for first-time connection, plus a
+    link to the connections page. It deliberately offers no disconnect button:
+    dropping a credential mid-OAuth is not what the user came for.
+  - Apify stays optional. A test asserts the Approve button's disabled state
+    depends only on the Meta token count across all four
+    `tokens × apify` combinations.
+- Extracted the duplicated, unexported `escapeHtml` into `src/utils/html.ts`
+  (it existed byte-identically in `src/transport/http.ts` and
+  `src/transport/auth-routes.ts`) and the consent page's inline CSS into
+  `src/transport/html-pages.ts`, now shared by both surfaces.
+- **Meta Ad Library scraping via Apify — 8 new `ads_library_*` tools (127 → 135).**
+  Competitor ad research against the *public* Meta Ad Library, which the Graph
+  API does not expose. Backed by the
+  [curious_coder/facebook-ads-library-scraper](https://apify.com/curious_coder/facebook-ads-library-scraper)
+  actor.
+  - `ads_library_scrape` starts an asynchronous run from either a keyword
+    search (country / active status / ad type / search type) or a
+    facebook.com Ad Library or page URL, and returns a `run_id` +
+    `dataset_id`.
+  - `ads_library_get_run_status`, `ads_library_get_results` (paginated, with a
+    compact per-ad projection and a `raw` escape hatch), `ads_library_abort_run`
+    and `ads_library_list_runs` cover the rest of the run lifecycle.
+  - `ads_library_register_apify_token`, `ads_library_get_apify_token_status`
+    and `ads_library_delete_apify_token` manage the credential.
+- **Per-tenant Apify tokens, encrypted at rest** (`src/store/apify-token-repo.ts`).
+  Each user registers their own token; it is validated against the Apify API
+  *before* being persisted, then stored AES-256-GCM-encrypted in
+  `users/{fbUserId}/apify_tokens/default`. The GCM AAD is namespaced
+  `apify_token:{fbUserId}:default`, so a ciphertext cannot be relocated between
+  users or between the `meta_tokens` and `apify_tokens` collections.
+- **`src/apify/client.ts`** — a dedicated Apify API client with the same
+  timeout / retry / typed-error guarantees as `metaApiClient`. The token travels
+  in an `Authorization: Bearer` header (never a query param, so it cannot leak
+  into a logged URL), the base URL is not env-overridable, run/dataset ids are
+  validated before path interpolation, and every error message is scrubbed both
+  of `apify_api_*` substrings and of the exact token value in play.
+
+### Security
+
+- `POST /auth/register-apify-token` validates the token against Apify's
+  `/v2/users/me` **before** persisting it, and never echoes it: the error page
+  shows a fixed string while the upstream message goes to the logs, and only
+  `hashToken()` / `hashPii()` are logged. `renderConnectionsPage` is tested to
+  never contain the stored token.
+- Input is rejected for control characters and inner whitespace, not just
+  length. The token is interpolated into an `Authorization: Bearer` header, so
+  an embedded CR/LF is a header-injection attempt and must fail before the
+  outbound call rather than relying on the HTTP client to notice.
+- Token validation uses a dedicated `ApifyApiClient({ timeout: 10_000,
+  maxRetries: 0 })` rather than the shared singleton (30s / 3 retries), so a
+  stalling `api.apify.com` cannot hold a user-facing request for minutes.
+- `/auth/register-apify-token` is rate limited (10 per 15 min) — the first
+  limiter on `/auth/*`, justified because each POST makes an outbound call to a
+  third party, which uncapped turns the endpoint into a credential-validation
+  oracle. It is registered **before** `mountAuthRoutes`, since Express matches
+  in registration order and a limiter added after the route would never run;
+  verified against the booted server (10× 401 then 429).
+- `validateMetaAuthReturn` was hard-wired to `/authorize`, so login could not
+  return to a non-OAuth page. Widened by an exact-string allowlist containing
+  only `/auth/connections`, compared **before** any URL parsing.
+- **Closed an open redirect** that the first version of that widening exposed.
+  `safeReturnTo` rejected `//` but not `/\`, and the WHATWG URL parser (like
+  browsers) normalizes `\` to `/` for special schemes — so
+  `/\evil.example/auth/connections` kept the expected `pathname` while
+  resolving to an external host, and a `pathname`-only check accepted it. The
+  pre-existing `/authorize` branch was accidentally shielded by its
+  client_id/redirect_uri requirement; the new standalone path had no such
+  shield. Fixed in three layers: reject backslashes outright, compare
+  standalone paths as exact strings before parsing, and pin `parsed.origin` to
+  the fixed base instead of trusting `pathname`. Covered by nine bypass tests.
+- The new POSTs validate request provenance via Fetch Metadata
+  (`Sec-Fetch-Site`), falling back to `Origin` compared against the origin the
+  browser actually contacted. `SameSite=Lax` blocks a cross-*site* POST, but
+  same-site is not same-origin — on a custom domain a sibling subdomain could
+  otherwise swap a tenant's Apify token for the attacker's and silently
+  redirect their scrapes. Requests carrying neither header are not browser form
+  posts and fall through to the session check.
+- A failure reading the Apify status no longer takes down the consent page.
+  Apify is an optional add-on, but `/authorize` had made `getStatus()` a hard
+  dependency inside `Promise.all`, so a storage hiccup would have blocked OAuth
+  approval entirely. It now degrades to "not connected" and logs.
+- `safeReturnTo` takes an optional fallback typed as a literal union, so a
+  caller can never route a user to an attacker-supplied destination.
+- `/auth/connections` sends a stricter CSP than the consent page (no external
+  `redirectOrigin`, plus `base-uri 'none'` and `frame-ancestors 'none'`), and
+  both pages now send `Cache-Control: no-store` and `Vary: Cookie` — the
+  consent page previously cached despite rendering token and Business Manager
+  names.
+- `fbUserId` on every new handler comes only from the session cookie, never
+  from the request body. Verified that the web route and the MCP tools resolve
+  the same tenant id, so the UI cannot write a token the tools would not read.
+- **The global gitleaks allowlist was silently far wider than written.**
+  gitleaks joins allowlist patterns into a single alternation (an optimization
+  promoted in 8.28.0), so an inline `(?i)` leaks into every pattern that follows
+  it. In practice that turned `test[-_]?(token|secret|key)` case-insensitive,
+  which exempted any credential containing an uppercase `TEST` — a real-looking
+  `apify_api_TESTtoken…` value passed a local scan while CI (then on 8.24.3)
+  correctly flagged it. The two spellings of `placeholder` in the list were the
+  tell that case-sensitivity had always been the intent.
+  This affects **`paths` as well as `regexes`**: a probe confirmed that a
+  leading `(?i)` entry made a following case-sensitive path pattern exclude
+  `SECRETS.NOTES` too, so a file that should have been scanned was skipped
+  outright. Every pattern in both lists now declares `(?i)` or `(?-i)`
+  explicitly, so they mean the same thing on every gitleaks version regardless
+  of ordering.
+- The local guard scripts now **fail closed** around their own preconditions.
+  Previously a missing gitleaks binary was a `[SKIP]`, and a missing, empty or
+  non-semver `.gitleaks-version` silently disabled the version check — a green
+  run that reads as evidence the scan happened. All five states (no pin, empty
+  pin, non-semver pin, unreadable `gitleaks version`, binary absent) are now
+  blocking failures.
+- Pinned the scanner version in [.gitleaks-version](.gitleaks-version), read by
+  both [ci.yml](.github/workflows/ci.yml) and the local guard scripts, which
+  now fail on a mismatch instead of letting a green local run imply a green CI.
+  The workflow validates the pin is a bare semver before it reaches
+  `GITHUB_ENV`, since it is checked-out repo content.
+- Added `tests/gitleaks-config.test.ts` to keep the case-flag convention from
+  regressing: it asserts every allowlist regex declares its flag, that the
+  fixture exemptions stay case-sensitive, and that the `apify-api-token` rule
+  still matches a production-shaped token while ignoring the repo's short
+  fixtures.
+- **Tenant isolation fails closed.** In multi-tenant mode (Meta OAuth app
+  configured, HTTP transport) a caller with no OAuth identity — an API-key
+  request, or any flow that loses `fbUserId` — is refused rather than bucketed
+  into a shared credential. The `APIFY_TOKEN` environment variable is honoured
+  **only** in single-tenant mode (stdio, or no Meta app configured); it is
+  never used as a cross-tenant fallback, so one advertiser's scrapes can never
+  be billed to the operator's Apify account.
+- A stored token that fails authenticated decryption (GCM tag mismatch from a
+  relocated document, key rotation, or tampering) raises an error instead of
+  being reported as "no token" — degrading an integrity failure to absence
+  would have fallen through to a fallback credential.
+- Cost reporting derives from `chargedEventCounts` when Apify has not yet
+  settled `usageTotalUsd`. Verified against the live API: a run that has just
+  flipped to `SUCCEEDED` still reports `usageTotalUsd: 0` for a few seconds,
+  so a caller polling to completion would have been told a billable scrape was
+  free. The charged event count is accurate immediately.
+- Cost containment: each scrape sends Apify a hard `maxTotalChargeUsd` cap
+  derived from the requested `count`. The actor bills PAY_PER_EVENT
+  ($0.00075/ad), so Apify aborts the run server-side rather than billing past
+  the cap; `count` is additionally capped at 2,000 per call. Note this bounds
+  each *run*, not a tenant's aggregate spend — a client can still start many
+  runs, each against its own Apify account and credit.
+- `POST` is never retried automatically, which removes the client-side
+  duplicate-run path. It does **not** make double billing impossible: Apify can
+  accept a run and lose the response, so a timed-out start is *indeterminate*.
+  The timeout message says so and points at `ads_library_list_runs` to check
+  before retrying.
+- `ads_library_scrape` accepts URLs only over https on an exact `facebook.com`
+  host allowlist, and additionally rejects embedded credentials, non-default
+  ports, and Facebook's outbound redirect endpoints (`/l.php` and friends) that
+  would send the scraper off-site.
+- Added an `apify-api-token` rule to [.gitleaks.toml](.gitleaks.toml).
+- Pino now has a `redact` configuration (previously none at all) covering
+  token- and authorization-shaped keys, as defense in depth behind the existing
+  call-site hashing/masking convention.
+
+## [3.5.0] — 2026-08-09
+
 ### Security
 
 - **`npm audit` clean again — 0 vulnerabilities.** Advisories published after
@@ -18,6 +189,22 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   dependency changed.
 
 ### Added
+
+- **`ads_get_creative_media` — see the actual creative, not just its URLs.**
+  Given an `ad_id` or `creative_id`, the tool walks the creative
+  (`image_url`/`image_hash`, `object_story_spec` link/video data including
+  carousel `child_attachments`, `asset_feed_spec` assets, and the upsized
+  `thumbnail_url` fallback for boosted posts), resolves image hashes through a
+  single batched `adimages` lookup, downloads each image through the existing
+  SSRF-hardened downloader, and returns them as inline MCP `image` content
+  blocks that a multimodal model (Claude, Gemini) can analyze directly. Videos
+  cannot be embedded as MCP blocks, so each one returns its best thumbnail as
+  an image block plus a signed short-lived `source` URL (and a ready-to-use
+  download hint) in the JSON metadata for external download or video-capable
+  models. Response size is bounded by a `max_images` cap (default 5), an 8 MB
+  per-image limit and a 20 MB cumulative budget; `image_size: "small"` swaps in
+  128px previews to save context. Partial failures (an expired CDN URL, an
+  unresolvable hash) are reported per-asset without failing the call.
 
 - **`ads_update_ad_url_tags` — edit the UTM parameters of live ads (1-50 per
   call).** Meta creatives are immutable (`POST /{creative_id}` only accepts
@@ -43,6 +230,20 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   `ads_get_ad_creatives` gained an optional `fields` param, making an
   account-wide UTM audit a single call.
 
+- **`ads_bulk_create_video_ads`** — turns a list of public video URLs into ads
+  in a single call: uploads each video, waits for Meta to finish processing,
+  picks the preferred thumbnail automatically, builds the creative and creates
+  the ad in the target ad set. Ads are created `PAUSED` by default.
+
+  A video rejected by Meta does not abort the batch — each item reports its own
+  outcome and failure stage — but an account-wide error (expired token, rate
+  limit, abuse signal) stops it immediately instead of retrying under a block.
+  The call aims to finish within 180s, well under the Cloud Run request timeout,
+  so it returns the IDs it already created; videos left over come back marked
+  `skipped`, making a re-run of just those safe from paid duplicates. As with
+  `ads_run_report_and_wait`, the budget is best-effort — an individual Graph
+  request can still overrun it.
+
 ### Fixed
 
 - **`effective_link_url` no longer fails with Meta error #100.** The field is
@@ -58,20 +259,6 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   used to POST an empty body to Meta and answer "updated successfully". Both
   now fail with an explanation — the creative error points at
   `ads_update_ad_url_tags` for UTM changes.
-
-- `ads_bulk_create_video_ads` — turns a list of public video URLs into ads in a
-  single call: uploads each video, waits for Meta to finish processing, picks the
-  preferred thumbnail automatically, builds the creative and creates the ad in the
-  target ad set. Ads are created `PAUSED` by default.
-
-  A video rejected by Meta does not abort the batch — each item reports its own
-  outcome and failure stage — but an account-wide error (expired token, rate
-  limit, abuse signal) stops it immediately instead of retrying under a block.
-  The call aims to finish within 180s, well under the Cloud Run request timeout,
-  so it returns the IDs it already created; videos left over come back marked
-  `skipped`, making a re-run of just those safe from paid duplicates. As with
-  `ads_run_report_and_wait`, the budget is best-effort — an individual Graph
-  request can still overrun it.
 
 ## [3.4.1] — 2026-07-22
 

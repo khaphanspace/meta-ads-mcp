@@ -29,10 +29,15 @@ Before **any** `git commit -m`, `git push`, `gcloud run deploy`, `docker push`, 
 3. `npm test` passes (runs vitest).
 4. `npm run build` passes (TypeScript build).
 5. **No prohibited files in staging**: `.env`, `.env.*` (except `.env.example`), `*.key`, `*.pem`, `credentials.json`, `service-account*.json`, SSH private keys, `*.p12`, `*.pfx`.
-6. **`gitleaks git --staged --config .gitleaks.toml`** finds no secrets.
+6. **`gitleaks git --staged --config .gitleaks.toml`** finds no secrets. Your
+   local gitleaks must match the version pinned in [.gitleaks-version](.gitleaks-version)
+   — CI reads the same file, and different releases disagree about allowlist
+   semantics, so a mismatched binary can report "clean" on content CI rejects.
+   Both guard scripts fail loudly on a mismatch.
 7. **No project-specific patterns** appear in the staged diff. Custom regex covers (full list in [.gitleaks.toml](.gitleaks.toml)):
    - `META_APP_SECRET=`, `OAUTH_SECRET=`, `OAUTH_APPROVAL_PIN=`, `SESSION_COOKIE_SECRET=`, `TOKEN_ENCRYPTION_KEY=`, `MCP_API_KEY=`
    - Meta access tokens: `EAA[A-Za-z0-9]{20,}`
+   - Apify API tokens: `apify_api_[A-Za-z0-9]{20,}`
    - `META_TOKENS` as a JSON map of `EAA…` tokens (multi-tenant)
    - Google: `AIza[A-Za-z0-9_-]{35}`, `ya29\.[A-Za-z0-9_-]+`, GCP service account JSON
    - Generic: `-----BEGIN … PRIVATE KEY-----`, GitHub PATs (`gh[pousr]_`), AWS keys (`AKIA`)
@@ -88,6 +93,7 @@ Source: [.env.example](.env.example). Each one is treated as a hard secret.
 | `SESSION_COOKIE_SECRET` | Cookie signing for OAuth flow | Forge in-flight authenticating sessions. |
 | `TOKEN_ENCRYPTION_KEY` | AES-256-GCM key for tokens-at-rest | Decrypt every Meta token in Firestore. **Catastrophic.** |
 | `MCP_API_KEY` | Service-to-service key | Bypass OAuth entirely. |
+| `APIFY_TOKEN` | Apify API token (fallback only; per-tenant tokens live encrypted in Firestore) | Full control of the Apify account: run any actor, drain credits, read every dataset. |
 | GCP creds (WIF / service account) | Cloud auth | Deploy malicious revisions, read Firestore, escalate via IAM. |
 
 If any of these leaks, see the rotation playbooks in [.github/pre-deploy-guard/references/sensitive-patterns.md](.github/pre-deploy-guard/references/sensitive-patterns.md).
