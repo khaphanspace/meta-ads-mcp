@@ -25,6 +25,10 @@ export interface MetaApiClientConfig {
   maxRetries?: number;
 }
 
+interface RequestScope {
+  accountId?: string;
+}
+
 /**
  * Typed client for the Meta Graph API.
  *
@@ -82,6 +86,7 @@ export class MetaApiClient {
   async postForm<T>(
     path: string,
     params: Record<string, string | number | boolean>,
+    scope?: RequestScope,
   ): Promise<T> {
     const url = this.buildUrl(path);
     const formBody = new URLSearchParams();
@@ -91,7 +96,7 @@ export class MetaApiClient {
     return this.execute<T>("POST", url, path, {
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: formBody.toString(),
-    });
+    }, false, scope);
   }
 
   async postMultipart<T>(
@@ -104,8 +109,11 @@ export class MetaApiClient {
     return this.execute<T>("POST", url, path, { body: formData }, true);
   }
 
-  async delete<T>(path: string): Promise<T> {
-    const url = this.buildUrl(path);
+  async delete<T>(
+    path: string,
+    params?: Record<string, string | number | boolean | undefined>,
+  ): Promise<T> {
+    const url = this.buildUrl(path, params);
     return this.execute<T>("DELETE", url, path);
   }
 
@@ -135,6 +143,13 @@ export class MetaApiClient {
     };
   }
 
+  resetForTests(): void {
+    this.rateLimiter.reset();
+    this.circuitBreaker.reset();
+    this.writePacer.reset();
+    this.lastUsageLogAt = 0;
+  }
+
   // ─── Internal ────────────────────────────────────────────────
 
   private buildUrl(
@@ -161,10 +176,11 @@ export class MetaApiClient {
     path: string,
     options?: RequestInit,
     skipTokenParam = false,
+    scope?: RequestScope,
   ): Promise<T> {
     const token = getAccessToken();
     const tokenHash = hashToken(token);
-    const accountId = extractAccountId(path);
+    const accountId = scope?.accountId ?? extractAccountId(path);
     const context: RequestContext = { tokenHash, accountId };
     const circuitContext: CircuitContext = {
       tokenHash,
@@ -190,10 +206,19 @@ export class MetaApiClient {
 
     // POST to /act_<id>/<collection> creates new resources without native
     // idempotency on Meta's side — retrying a timeout/5xx/network error can
-    // mint duplicates (e.g. two ad sets for one user intent). Other POSTs
-    // (updates on /<id>) and DELETEs are idempotent at the API level.
+    // mint duplicates (e.g. two ad sets for one user intent). The /<id>/copies
+    // edge (ad/ad set/campaign duplication) creates a resource on a non-act_
+    // path, so it must be classed as creating too — otherwise a retried copy
+    // mints a duplicate ad. The WhatsApp creating edges live on plain-numeric
+    // WABA/phone paths: /message_templates, /flows, /message_qrdls create
+    // resources, and /request_code sends a real SMS/voice call — all mint
+    // duplicates on retry. Other POSTs (updates on /<id>) and DELETEs are
+    // idempotent at the API level.
     const isCreatingRequest =
-      method === "POST" && /^\/?act_[A-Za-z0-9]+\//.test(path);
+      method === "POST" &&
+      (/^\/?act_[A-Za-z0-9]+\//.test(path) ||
+        /\/copies$/.test(path) ||
+        /\/(message_templates|flows|message_qrdls|request_code)$/.test(path));
     const canRetryTransport = !isCreatingRequest;
 
     let lastError: Error | undefined;

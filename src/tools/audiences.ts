@@ -5,7 +5,7 @@ import { normalizeAccountId, validateMetaId } from "../utils/format.js";
 import { buildFieldsParam } from "../utils/validation.js";
 import { AUDIENCE_DEFAULT_FIELDS } from "../meta/types/audience.js";
 import type { CustomAudience, MetaApiResponse } from "../meta/types/index.js";
-import { READ, CREATE, DELETE, WRITE_WARNING } from "./_register.js";
+import { READ, CREATE, UPDATE, DELETE, WRITE_WARNING } from "./_register.js";
 
 export function registerAudienceTools(server: McpServer): void {
   // ─── Get Custom Audiences ─────────────────────────────────────
@@ -87,15 +87,17 @@ export function registerAudienceTools(server: McpServer): void {
   server.registerTool(
     "ads_create_custom_audience",
     {
-      description: `${WRITE_WARNING}Create a new custom audience on an ad account (CUSTOM customer-list, WEBSITE pixel-based, APP, OFFLINE_CONVERSION or ENGAGEMENT). For CUSTOM/customer-list audiences, PII (email, phone) must be SHA-256 hashed before upload. After creation: (1) optionally feed users via the customer-list endpoint, (2) build a lookalike with ads_create_lookalike_audience, and (3) apply the audience id to an ad set with ads_update_ad_set (targeting.custom_audiences=[{id}]).`,
+      description: `${WRITE_WARNING}Create a custom audience on an ad account. Two main flows: (a) WEBSITE pixel-based — pass 'rule' (event_sources of type 'pixel') and OMIT 'subtype' (Meta v18+ infers it; passing subtype: WEBSITE returns error 2654). (b) CUSTOM customer-list — pass subtype: 'CUSTOM' + customer_file_source; PII must be SHA-256 hashed before uploading users. After creation: build a lookalike with ads_create_lookalike_audience and apply the id to an ad set with ads_update_ad_set (targeting.custom_audiences=[{id}]).`,
       inputSchema: {
         account_id: z.string().describe("Ad account ID"),
         name: z.string().min(1).describe("Audience name"),
         description: z.string().optional().describe("Audience description"),
         subtype: z
           .enum(["CUSTOM", "WEBSITE", "APP", "OFFLINE_CONVERSION", "ENGAGEMENT"])
-          .default("CUSTOM")
-          .describe("Audience subtype"),
+          .optional()
+          .describe(
+            "Audience subtype. OMIT (or pass 'WEBSITE') when 'rule' is set — for pixel-based audiences Meta infers the subtype and rejects an explicit one (error 2654); the tool drops it automatically. For non-rule flows: when omitted, defaults to 'CUSTOM' (customer-list), which also requires customer_file_source.",
+          ),
         customer_file_source: z
           .enum([
             "USER_PROVIDED_ONLY",
@@ -103,9 +105,14 @@ export function registerAudienceTools(server: McpServer): void {
             "BOTH_USER_AND_PARTNER_PROVIDED",
           ])
           .optional()
-          .describe("Source of customer data (required for CUSTOM subtype)"),
+          .describe("Required only when subtype = 'CUSTOM' (customer-list)."),
         retention_days: z.number().optional().describe("Retention period in days"),
-        rule: z.string().optional().describe("Rule definition for WEBSITE audiences (JSON string)"),
+        rule: z
+          .string()
+          .optional()
+          .describe(
+            "JSON rule for pixel/event-based audiences (WEBSITE). Shape: {inclusions:{operator:'or',rules:[{event_sources:[{id:'<pixel_id>',type:'pixel'}],retention_seconds:<n>,filter:{operator:'and',filters:[{field:'event',operator:'=',value:'<event_name>'}]}}]}}. When 'rule' is set, omit 'subtype'.",
+          ),
         prefill: z.boolean().optional().describe("Whether to prefill with existing data (for WEBSITE)"),
       },
       annotations: { ...CREATE },
@@ -113,11 +120,17 @@ export function registerAudienceTools(server: McpServer): void {
     async ({ account_id, name, description, subtype, customer_file_source, retention_days, rule, prefill }) => {
       const id = normalizeAccountId(account_id);
 
-      const body: Record<string, string | number | boolean> = {
-        name,
-        subtype,
-      };
+      const effectiveSubtype = rule ? undefined : (subtype ?? "CUSTOM");
 
+      if (effectiveSubtype === "CUSTOM" && !customer_file_source) {
+        throw new Error(
+          "subtype 'CUSTOM' requires customer_file_source. Use one of: USER_PROVIDED_ONLY, PARTNER_PROVIDED_ONLY, BOTH_USER_AND_PARTNER_PROVIDED.",
+        );
+      }
+
+      const body: Record<string, string | number | boolean> = { name };
+
+      if (effectiveSubtype) body.subtype = effectiveSubtype;
       if (description) body.description = description;
       if (customer_file_source) body.customer_file_source = customer_file_source;
       if (retention_days !== undefined) body.retention_days = retention_days;
@@ -129,11 +142,12 @@ export function registerAudienceTools(server: McpServer): void {
         body,
       );
 
+      const reportedType = effectiveSubtype ?? "WEBSITE (inferred from rule)";
       return {
         content: [
           {
             type: "text",
-            text: `Custom audience created!\nID: ${result.id}\nName: ${name}\nType: ${subtype}`,
+            text: `Custom audience created!\nID: ${result.id}\nName: ${name}\nType: ${reportedType}`,
           },
         ],
       };
@@ -188,6 +202,150 @@ export function registerAudienceTools(server: McpServer): void {
     },
   );
 
+  // ─── Share Custom Audience ────────────────────────────────────
+  server.registerTool(
+    "ads_share_custom_audience",
+    {
+      description: `${WRITE_WARNING}Share a custom audience with one or more ad accounts under the same Business Manager. Both source and target accounts must belong to the same BM and the caller needs ads_management on each. Shareable subtypes: CUSTOM, LOOKALIKE, WEBSITE (engagement/offline-conversion audiences cannot be shared — Meta returns code 2655). Re-sharing with the same account is a no-op. After sharing, the target account can target the audience via ads_update_ad_set (targeting.custom_audiences=[{id}]).`,
+      inputSchema: {
+        audience_id: z.string().describe("Custom audience ID to share"),
+        ad_account_ids: z
+          .array(z.string())
+          .min(1)
+          .describe(
+            "Target ad account IDs (numeric or act_<id>). Must be in the same Business Manager as the audience owner.",
+          ),
+        relationship_type: z
+          .array(z.string())
+          .optional()
+          .describe('Optional relationship tags (e.g. ["AGENCY"]).'),
+      },
+      annotations: { ...UPDATE },
+    },
+    async ({ audience_id, ad_account_ids, relationship_type }) => {
+      const id = validateMetaId(audience_id, "audience");
+      const numericAccounts = ad_account_ids.map((a) =>
+        normalizeAccountId(a).slice("act_".length),
+      );
+
+      const body: Record<string, string | number | boolean> = {
+        adaccounts: JSON.stringify(numericAccounts),
+      };
+      if (relationship_type?.length) {
+        body.relationship_type = JSON.stringify(relationship_type);
+      }
+
+      const response = await metaApiClient.postForm<{ success?: boolean }>(
+        `/${id}/adaccounts`,
+        body,
+      );
+
+      if (response?.success !== true) {
+        throw new Error(
+          `Meta did not confirm the share for audience ${id}. Response: ${JSON.stringify(response)}`,
+        );
+      }
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Audience ${id} shared with ${numericAccounts.length} account(s): ${numericAccounts.join(", ")}`,
+          },
+        ],
+      };
+    },
+  );
+
+  // ─── Unshare Custom Audience ──────────────────────────────────
+  server.registerTool(
+    "ads_unshare_custom_audience",
+    {
+      description: `${WRITE_WARNING}Revoke a custom audience share from one or more ad accounts. Only removes the share relationship — the audience itself remains on the owner account. Use ads_get_audience_shared_accounts first to confirm which accounts currently have access.`,
+      inputSchema: {
+        audience_id: z.string().describe("Custom audience ID to unshare"),
+        ad_account_ids: z
+          .array(z.string())
+          .min(1)
+          .describe(
+            "Ad account IDs to revoke (numeric or act_<id>).",
+          ),
+      },
+      annotations: { ...UPDATE },
+    },
+    async ({ audience_id, ad_account_ids }) => {
+      const id = validateMetaId(audience_id, "audience");
+      const numericAccounts = ad_account_ids.map((a) =>
+        normalizeAccountId(a).slice("act_".length),
+      );
+
+      const query = new URLSearchParams({
+        adaccounts: JSON.stringify(numericAccounts),
+      }).toString();
+
+      const response = await metaApiClient.delete<{ success?: boolean }>(
+        `/${id}/adaccounts?${query}`,
+      );
+
+      if (response?.success !== true) {
+        throw new Error(
+          `Meta did not confirm the unshare for audience ${id}. Response: ${JSON.stringify(response)}`,
+        );
+      }
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Audience ${id} unshared from ${numericAccounts.length} account(s): ${numericAccounts.join(", ")}`,
+          },
+        ],
+      };
+    },
+  );
+
+  // ─── Get Audience Shared Accounts ─────────────────────────────
+  server.registerTool(
+    "ads_get_audience_shared_accounts",
+    {
+      description:
+        "List ad accounts that currently have shared access to a custom audience. Returns each account id + name. Use before ads_share_custom_audience / ads_unshare_custom_audience to audit the share set.",
+      inputSchema: {
+        audience_id: z.string().describe("Custom audience ID"),
+        limit: z.number().min(1).max(100).default(25),
+      },
+      annotations: { ...READ },
+    },
+    async ({ audience_id, limit }) => {
+      const id = validateMetaId(audience_id, "audience");
+
+      const response = await metaApiClient.get<
+        MetaApiResponse<{ account_id: string; id?: string; name?: string }>
+      >(`/${id}/adaccounts`, { fields: "account_id,name", limit });
+
+      const accounts = response.data ?? [];
+      const text =
+        accounts.length === 0
+          ? "No shared accounts."
+          : accounts
+              .map(
+                (a) =>
+                  `• ${a.name ?? "(unnamed)"} (act_${a.account_id})`,
+              )
+              .join("\n");
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Audience ${id} is shared with ${accounts.length} account(s):\n\n${text}`,
+          },
+          { type: "text", text: JSON.stringify(accounts, null, 2) },
+        ],
+      };
+    },
+  );
+
   // ─── Delete Custom Audience ───────────────────────────────────
   server.registerTool(
     "ads_delete_custom_audience",
@@ -200,7 +358,13 @@ export function registerAudienceTools(server: McpServer): void {
     },
     async ({ audience_id }) => {
       const id = validateMetaId(audience_id, "audience");
-      await metaApiClient.delete<{ success: boolean }>(`/${id}`);
+      const response = await metaApiClient.delete<{ success?: boolean }>(`/${id}`);
+
+      if (response?.success !== true) {
+        throw new Error(
+          `Meta did not confirm the deletion for audience ${id}. Response: ${JSON.stringify(response)}`,
+        );
+      }
 
       return {
         content: [

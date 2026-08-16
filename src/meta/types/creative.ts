@@ -18,6 +18,7 @@ export type CallToActionType =
 export interface AdCreative {
   id: string;
   name: string;
+  account_id?: string;
   title?: string;
   body?: string;
   image_hash?: string;
@@ -27,10 +28,28 @@ export interface AdCreative {
   asset_feed_spec?: Record<string, unknown>;
   call_to_action_type?: CallToActionType;
   link_url?: string;
+  // Derived locally via extractEffectiveLinkUrl — NOT a real Meta field, so it
+  // must never be added to CREATIVE_DEFAULT_FIELDS (Graph API rejects it with #100).
   effective_link_url?: string;
   effective_object_story_id?: string;
   status?: string;
+  url_tags?: string;
+  instagram_user_id?: string;
+  source_instagram_media_id?: string;
+  effective_instagram_media_id?: string;
+  degrees_of_freedom_spec?: Record<string, unknown>;
+  adlabels?: Array<{ id?: string; name?: string }>;
 }
+
+/** Fields this server derives locally; they are stripped before hitting Meta. */
+export const SYNTHETIC_CREATIVE_FIELDS = ["effective_link_url"] as const;
+
+/** Real fields extractEffectiveLinkUrl reads to derive effective_link_url. */
+export const EFFECTIVE_LINK_URL_SOURCE_FIELDS = [
+  "link_url",
+  "object_story_spec",
+  "asset_feed_spec",
+] as const;
 
 export interface ImageUploadResult {
   images: Record<
@@ -57,7 +76,7 @@ export const CREATIVE_DEFAULT_FIELDS = [
   "asset_feed_spec",
   "call_to_action_type",
   "link_url",
-  "effective_link_url",
   "effective_object_story_id",
   "status",
+  "url_tags",
 ] as const;

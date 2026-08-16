@@ -17,7 +17,7 @@
 - [Who is this for?](#who-is-this-for)
 - [Aligned with Meta's official MCP](#aligned-with-metas-official-mcp)
 - [Features](#features)
-- [Tools (93 total)](#tools-93-total)
+- [Tools (135 total)](#tools-135-total)
 - [Quick start](#quick-start)
 - [Authentication — three modes](#authentication--three-modes)
 - [Setting up Sign in with Meta](#setting-up-sign-in-with-meta)
@@ -62,7 +62,7 @@ both servers.
 | | Meta's official MCP (`mcp.facebook.com/ads`) | This project |
 |---|---|---|
 | Auth model | Per-user OAuth in your AI client | **Multi-tenant**: agency operator handles N client accounts from one server |
-| Tool surface | 29 tools (campaigns, ads, catalogs, 5 insight views, opportunity_score, dataset, errors, help) | **93 tools** including the official 29-equivalent + audiences, lookalikes, lead forms, automated rules, A/B studies, async reports, custom conversions, asset uploads, comment moderation, cross-account macros |
+| Tool surface | 29 tools (campaigns, ads, catalogs, 5 insight views, opportunity_score, dataset, errors, help) | **126 tools** including the official 29-equivalent + audiences, lookalikes, lead forms, automated rules, A/B studies, async reports, billing invoices, custom conversions, asset uploads, comment moderation, cross-account macros, and full WhatsApp Business management (templates, phone numbers, flows, QR codes) |
 | Hosting | Hosted by Meta | Self-hosted on Cloud Run / your infra; tokens encrypted at rest in Firestore |
 | Cross-account | Per-user, single Meta login | Yes — `ads_portfolio_summary` aggregates across N accounts |
 | Token control | Lives in your AI client | Server-side System User token registry per agency operator |
@@ -78,7 +78,7 @@ When to use which:
 
 ## Features
 
-- **93 tools** covering campaign management, creatives, targeting, audiences, reporting, comments, billing, tokens, Instagram workflows, rate-limit observability, semantic insight views, diagnostics, help-center search, and agency-tier cross-account macros.
+- **135 tools** covering campaign management, creatives, targeting, audiences, reporting, comments, billing, invoices, tokens, Instagram workflows, WhatsApp Business management, rate-limit observability, semantic insight views, diagnostics, help-center search, competitor research via the public Meta Ad Library, and agency-tier cross-account macros.
 - **Aligned vocabulary** with Meta's official MCP server so agents transfer cleanly between both.
 - **Sign in with Meta (Facebook Login)** — replaces shared PINs. Each user lands their own long-lived (60-day) Meta token.
 - **System User token registry** — for tokens that don't expire, register them per user from the consent UI.
@@ -94,37 +94,76 @@ When to use which:
 - **Async reports with safe polling** — `ads_run_report_and_wait` one-shot with 5 s-min / 60 s-max backoff, proper `Job Failed` / `Job Skipped` handling.
 - **Retry logic** — exponential backoff on truly transient errors only (never on throttled requests).
 
-## Tools (93 total)
+## Tools (135 total)
 
-All tools use the `ads_*` naming convention, aligned with Meta's official MCP server. Read tools declare `readOnlyHint: true`; mutating tools declare `destructiveHint` / `idempotentHint` and prefix descriptions with `⚠️ Modifies live ads/account data.`
+Ads tools use the `ads_*` naming convention, aligned with Meta's official MCP server; WhatsApp Business tools use `whatsapp_*`. Read tools declare `readOnlyHint: true`; mutating tools declare `destructiveHint` / `idempotentHint` and prefix descriptions with a `⚠️` warning.
 
 | Category | Tools | Description |
 |---|---|---|
 | Accounts | 3 | `ads_get_ad_accounts`, `ads_get_account_info`, `ads_get_pages_for_business` |
 | Campaigns | 5 | CRUD + status management |
-| Ad Sets | 6 | CRUD + clone bundle with full targeting spec |
-| Ads | 5 | CRUD with creative assignment |
+| Ad Sets | 6 | CRUD + clone bundle (native ad-copy, 100% creative-type coverage incl. dynamic/Advantage+) |
+| Ads | 6 | CRUD with creative assignment, UTM (`url_tags`) editing |
 | Creatives | 9 | List, details, create/update, image/video library and uploads |
+| Creative media | 1 | `ads_get_creative_media` — downloads an ad's images (incl. carousel cards and video thumbnails) and returns them as inline MCP image blocks for visual analysis; videos come with a signed source URL for external download |
 | Generic entity helpers | 3 | `ads_get_ad_entities`, `ads_update_entity`, `ads_activate_entity` (mirror official MCP) |
 | Insights — power tool | 1 | `ads_get_insights` — full control over breakdowns, attribution, time series |
 | Insights views | 5 | `performance_trend`, `anomaly_signal`, `auction_ranking_benchmarks`, `industry_benchmark`, `advertiser_context` |
 | Targeting | 7 | Interest / behavior / demographic / geo search, audience estimation, targeting description |
 | Budget | 1 | Budget schedule management |
 | Leads | 4 | Lead forms and lead retrieval |
-| Audiences | 5 | Custom audiences and lookalikes |
+| Audiences | 8 | Custom audiences, lookalikes, and cross-account sharing |
 | Previews | 2 | Ad previews before launch |
 | Pixels | 5 | Pixel details, events, custom conversions |
 | Comments | 4 | Ad comment moderation |
 | Rules | 5 | Automated rules and rule details |
 | A/B Testing | 3 | Ad study creation and inspection |
 | Reports | 4 | Async report creation, status, retrieval, and one-shot run+wait |
-| Billing | 3 | Billing info and spend limits |
+| Billing | 4 | Billing info, spend limits, and invoices (`ads_get_invoices`) |
 | Diagnostics | 3 | `ads_get_opportunity_score`, `ads_get_dataset_quality`, `ads_get_errors` |
 | Help search | 1 | `ads_get_help_article` — curated Meta Business Help Center search |
 | Agency macros | 2 | `ads_diagnose_underperformance`, `ads_portfolio_summary` (cross-account) |
+| Bulk ad creation | 1 | `ads_bulk_create_video_ads` — video URLs → upload, processing wait, auto-thumbnail, creative and ad in one call |
 | Instagram | 2 | IG account and media lookup |
+| Ad Library (Apify) | 8 | Competitor ad research: `ads_library_scrape` the public Meta Ad Library by keyword or Facebook page, poll run status, page through results, abort runs, plus per-user Apify token register/status/delete |
 | Tokens | 4 | List / set-active / register / delete |
 | Rate Status | 1 | Live view of quota usage, open circuits and write-pacer state |
+| WhatsApp — WABAs & phones | 8 | `whatsapp_get_business_accounts`, phone number list/register/deregister/verify, business profile get/update |
+| WhatsApp — Templates & analytics | 6 | Message template CRUD (`whatsapp_create_template`, edit, delete), WABA analytics (messaging/conversation/pricing), per-template analytics |
+| WhatsApp — Flows | 6 | Flow list/create/update (incl. Flow JSON upload), publish, deprecate, delete |
+| WhatsApp — QR & webhooks | 7 | QR deep-link CRUD (`message_qrdls`), webhook subscription get/subscribe/unsubscribe |
+
+The `ads_library_*` tools read the **public** Meta Ad Library through the
+[curious_coder/facebook-ads-library-scraper](https://apify.com/curious_coder/facebook-ads-library-scraper)
+Apify actor, so they need no Meta permissions — but they do need an Apify token
+and they cost money (about **$0.75 per 1,000 ads**). Each user registers their
+own token with `ads_library_register_apify_token`; it is validated against the
+Apify API and then stored encrypted with AES-256-GCM in Firestore, scoped to
+that user, exactly like Meta tokens. Every scrape sends Apify a hard
+`maxTotalChargeUsd` cap derived from the requested `count`, so a single run
+cannot bill past it (the cap is per run, not a per-tenant budget).
+
+Registering the token does **not** require going through an assistant: the
+server serves an authenticated **`/auth/connections`** page that lists your
+stored Meta tokens and your Apify connection, and lets you register, replace or
+disconnect the Apify token at any time. The consent screen shown during OAuth
+approval carries the same Apify section for first-time setup, plus a link to
+that page. The `ads_library_register_apify_token` tool still works for agents
+and headless setups.
+
+Credential resolution **fails closed**: in multi-tenant mode a caller with no
+OAuth identity is refused rather than falling back to a shared credential. The
+`APIFY_TOKEN` environment variable is honoured only in single-tenant mode
+(stdio transport, or no Meta OAuth app configured), so one advertiser's scrapes
+can never be billed to the operator's Apify account.
+
+Two operational caveats worth knowing: runs execute against the actor's
+`latest` build, so an upstream change to its input schema or pricing can alter
+behaviour without a change in this repo; and a scrape start that times out is
+*indeterminate* rather than failed — Apify may have accepted it — so check
+`ads_library_list_runs` before starting another.
+
+WhatsApp tools require the `whatsapp_business_management` permission. Tokens issued before this scope was added must be re-authorized (sign in again through the OAuth flow) before the `whatsapp_*` tools will work, and the Meta App must have the **WhatsApp product** added in the developer dashboard.
 
 Tool definitions live under [src/tools/](src/tools/), wired together in [src/tools/index.ts](src/tools/index.ts).
 
@@ -204,7 +243,7 @@ The repo is public but the deployment is private: nothing sensitive lives in the
 1. **Create a Meta App** at <https://developers.facebook.com>:
    - Add the *Facebook Login* product.
    - In *Facebook Login → Settings*, set the Valid OAuth Redirect URI to `<SERVER_URL>/auth/meta/callback`.
-   - In *App Review → Permissions and Features*, request `ads_management`, `ads_read`, `pages_show_list`, `pages_read_engagement`, `business_management`, `email`. While the app is in *Development* mode, only people listed under *Roles* can sign in.
+   - In *App Review → Permissions and Features*, request `ads_management`, `ads_read`, `pages_show_list`, `pages_read_engagement`, `business_management`, `whatsapp_business_management`, `email`. While the app is in *Development* mode, only people listed under *Roles* can sign in. For the `whatsapp_*` tools, also add the **WhatsApp product** to the app.
 
 2. **Provision Firestore** in your GCP project:
    - In the Cloud Console: Firestore → Create database → Native mode → pick a region.
@@ -321,6 +360,9 @@ A typical agency workflow: build a CRM-derived seed audience, expand it into a l
 | `ads_get_audience_details` | [src/tools/audiences.ts](src/tools/audiences.ts) | Inspect one audience: subtype, retention, size estimate. |
 | `ads_create_custom_audience` | [src/tools/audiences.ts](src/tools/audiences.ts) | Create CUSTOM / WEBSITE / APP / OFFLINE_CONVERSION / ENGAGEMENT subtypes. |
 | `ads_create_lookalike_audience` | [src/tools/audiences.ts](src/tools/audiences.ts) | Build a lookalike (1 %–20 %) from a seed audience + country. |
+| `ads_share_custom_audience` | [src/tools/audiences.ts](src/tools/audiences.ts) | Share an audience with one or more ad accounts in the same Business Manager. |
+| `ads_unshare_custom_audience` | [src/tools/audiences.ts](src/tools/audiences.ts) | Revoke the share from one or more ad accounts. |
+| `ads_get_audience_shared_accounts` | [src/tools/audiences.ts](src/tools/audiences.ts) | List which ad accounts currently have shared access to an audience. |
 | `ads_delete_custom_audience` | [src/tools/audiences.ts](src/tools/audiences.ts) | Permanent delete; cannot be undone. |
 | `ads_estimate_audience_size` | [src/tools/targeting.ts](src/tools/targeting.ts) | Get reach estimate before pushing the audience to an ad set. |
 | `ads_update_ad_set` | [src/tools/adsets.ts](src/tools/adsets.ts) | **Apply** the audience by writing to `targeting.custom_audiences`. |
@@ -564,6 +606,7 @@ services:
       - META_ACCESS_TOKEN=${META_ACCESS_TOKEN:-}
       - META_TOKENS=${META_TOKENS:-}
       - MCP_API_KEY=${MCP_API_KEY:-}
+      - APIFY_TOKEN=${APIFY_TOKEN:-}
       - META_API_VERSION=${META_API_VERSION:-v22.0}
       - PORT=3000
       - LOG_LEVEL=${LOG_LEVEL:-info}
