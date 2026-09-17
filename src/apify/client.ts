@@ -1,8 +1,8 @@
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import { getCurrentFbUserId, hashToken } from "../auth/token-store.js";
+import { hashToken } from "../auth/token-store.js";
 import { getApifyTokenRepo } from "../store/apify-token-repo.js";
 import { logger } from "../utils/logger.js";
-import { isStdioTransport } from "../utils/transport-mode.js";
+import { isSingleTenantMode, LOCAL_TENANT_ID, resolveTenantId } from "../auth/tenant.js";
 import type { ApifyErrorBody } from "./types.js";
 
 /** Fixed on purpose: an env-overridable base URL would let a config change redirect tenant tokens to an attacker host. */
@@ -10,15 +10,64 @@ const APIFY_BASE_URL = "https://api.apify.com";
 const DEFAULT_TIMEOUT = 30_000;
 const MAX_RETRIES = 3;
 const RETRY_BASE_DELAY = 1000;
+/** A dataset page is at most a few MB; anything larger is not a response worth buffering. */
+const MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
+
+function tooLarge(detail: string): McpError {
+  return new McpError(ErrorCode.InternalError, `Apify response too large (${detail}; limit ${MAX_RESPONSE_BYTES} bytes). Request a smaller page.`);
+}
+
+/**
+ * Reads a body under a byte budget: the declared length is checked first,
+ * streamed bodies are cancelled as soon as the budget is exceeded, and the
+ * fallback path measures UTF-8 bytes rather than UTF-16 units.
+ */
+async function readBoundedBody(response: Response, maxBytes: number): Promise<string> {
+  const declared = Number.parseInt(response.headers.get("content-length") ?? "", 10);
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    await response.body?.cancel().catch(() => undefined);
+    throw tooLarge(`declared ${declared} bytes`);
+  }
+  const body = response.body;
+  if (body && typeof body.getReader === "function") {
+    const reader = body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        total += value.byteLength;
+        if (total > maxBytes) {
+          await reader.cancel().catch(() => undefined);
+          throw tooLarge(`over ${maxBytes} bytes`);
+        }
+        chunks.push(value);
+      }
+    }
+    return Buffer.concat(chunks.map((c) => Buffer.from(c.buffer, c.byteOffset, c.byteLength))).toString("utf8");
+  }
+  const text = await response.text();
+  if (Buffer.byteLength(text, "utf8") > maxBytes) throw tooLarge(`over ${maxBytes} bytes`);
+  return text;
+}
+
+/**
+ * Empty bodies are failures where JSON is expected (204 is handled before
+ * this): a null page would be cached as an empty dataset. Thrown as a plain
+ * Error, not McpError, so execute() treats it like any other transport
+ * failure — retried on GET, flagged as indeterminate on POST.
+ */
+function parseJsonBody(text: string): unknown {
+  if (text.trim().length === 0) {
+    throw new Error("Apify returned an empty body where JSON was expected.");
+  }
+  return JSON.parse(text);
+}
 
 export const ADS_LIBRARY_ACTOR_ID = "curious_coder~facebook-ads-library-scraper";
 
-/**
- * Storage key for stdio / single-operator mode, where there is no OAuth
- * request context. Facebook user ids are numeric, so this cannot collide with
- * a real tenant. It is only ever reachable via isSingleTenantMode().
- */
-export const LOCAL_TENANT_ID = "_local";
+export { LOCAL_TENANT_ID };
 
 const APIFY_TOKEN_PATTERN = /apify_api_[A-Za-z0-9]+/g;
 
@@ -78,35 +127,13 @@ export function maskApifyToken(token: string): string {
 }
 
 /**
- * Multi-tenant is on exactly when the Meta OAuth app is configured, mirroring
- * `metaAppConfigured` in src/transport/security-config.ts. Read directly from
- * env rather than calling resolveSecurityConfig(), which validates and can
- * throw — this runs on every request and must not turn a config problem into
- * an unrelated tool failure.
- */
-function isSingleTenantMode(): boolean {
-  if (isStdioTransport(process.argv)) return true;
-  return !(process.env.META_APP_ID?.trim() && process.env.META_APP_SECRET?.trim());
-}
-
-/**
- * Which encrypted-token bucket this request may read.
- *
- * Fails closed: in multi-tenant HTTP mode an unidentified caller (API-key
- * mode, or any flow that loses the OAuth identity) must NOT silently land in
- * the shared `_local` bucket or on the server-wide APIFY_TOKEN — that would
- * let one tenant read another's credential and spend their Apify credit.
+ * Which encrypted-token bucket this request may read. Fails closed in
+ * multi-tenant mode without an OAuth identity (see src/auth/tenant.ts): an
+ * unidentified caller must never land on the shared `_local` bucket or the
+ * server-wide APIFY_TOKEN and spend another tenant's Apify credit.
  */
 export function resolveApifyTenantId(): string {
-  const fbUserId = getCurrentFbUserId();
-  if (fbUserId) return fbUserId;
-
-  if (isSingleTenantMode()) return LOCAL_TENANT_ID;
-
-  throw new McpError(
-    ErrorCode.InvalidRequest,
-    "The ads_library_* tools need an authenticated user in multi-tenant mode. Sign in through the Meta OAuth flow — API-key requests have no tenant identity, so no Apify token can be resolved for them.",
-  );
+  return resolveTenantId({ feature: "ads_library_*" });
 }
 
 /**
@@ -270,7 +297,12 @@ export class ApifyApiClient {
         // send headers and then stall mid-body forever; clearing the timeout
         // at header time would hang the call and hold the connection open.
         if (!response.ok) {
-          const errorBody = await response.json().catch(() => null);
+          const errorBody = await readBoundedBody(response, MAX_RESPONSE_BYTES)
+            .then((text) => (text.trim().length === 0 ? null : (JSON.parse(text) as unknown)))
+            .catch((err: unknown) => {
+              if (err instanceof McpError && /too large/.test(err.message)) throw err;
+              return null;
+            });
 
           if (response.status >= 500 && canRetry && attempt < this.maxRetries) {
             lastError = toMcpError(response.status, errorBody, null, token);
@@ -298,10 +330,8 @@ export class ApifyApiClient {
 
         // Apify returns 204 with no body for some endpoints (e.g. deletes).
         if (response.status === 204) return undefined as T;
-        return (await response.json()) as T;
+        return parseJsonBody(await readBoundedBody(response, MAX_RESPONSE_BYTES)) as T;
       } catch (error) {
-        if (error instanceof McpError) throw error;
-
         // Any failure after the request left the client is indeterminate for a
         // non-retryable (billable) call, not just a timeout: Apify may have
         // accepted the run and then dropped the connection or returned a
@@ -309,6 +339,12 @@ export class ApifyApiClient {
         const indeterminate = canRetry
           ? ""
           : " The request may still have been accepted — check ads_library_list_runs before starting another scrape.";
+
+        if (error instanceof McpError) {
+          // A body over the size cap is a transport-level failure too, and the run may have started.
+          if (!canRetry && /too large/.test(error.message)) throw new McpError(error.code, error.message + indeterminate);
+          throw error;
+        }
 
         if (error instanceof Error && error.name === "AbortError") {
           lastError = new McpError(
