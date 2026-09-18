@@ -27,6 +27,15 @@ function fakeExec(stdout = "", exitError?: Error): { exec: ExecFileFn; calls: Ar
   return { exec, calls };
 }
 
+/** The encoder's own limit: an input-side -threads only bounds decoding. */
+function expectEncoderThreadCap(args: string[]): void {
+  const afterInput = args.slice(args.indexOf("-i") + 1);
+  const outThreads = afterInput.indexOf("-threads");
+  expect(outThreads).toBeGreaterThan(-1);
+  expect(afterInput[outThreads + 1]).toBe("1");
+  expect(outThreads).toBeLessThan(afterInput.lastIndexOf("-f"));
+}
+
 describe("parseProbeOutput", () => {
   it("extracts duration, dimensions, fps and audio presence", () => {
     const probe = parseProbeOutput(PROBE_JSON, 4200000);
@@ -176,6 +185,7 @@ describe("createFfmpeg (unit, execFile injected)", () => {
     expect(args.join(" ")).toContain("scale=640:640:force_original_aspect_ratio=decrease");
     expect(calls[0].opts.cwd).toBe(outDir);
     expect(calls[0].opts.env).toEqual({ PATH: process.env.PATH });
+    expectEncoderThreadCap(args);
   });
 
   it("contactSheet tiles the frames into one jpeg and caps output size with -fs", async () => {
@@ -199,6 +209,7 @@ describe("createFfmpeg (unit, execFile injected)", () => {
     expect(sheet.columns).toBe(3);
     const joined = calls[0].args.join(" ");
     expect(joined).toContain("tile=3x2");
+    expectEncoderThreadCap(calls[0].args);
     expect(joined).toContain("scale=512:512:force_original_aspect_ratio=decrease");
     expect(calls[0].args).toEqual(expect.arrayContaining(["-fs"]));
   });
@@ -225,6 +236,7 @@ describe("createFfmpeg (unit, execFile injected)", () => {
     expect(args).toEqual(expect.arrayContaining(["-c:v", "libx264", "-c:a", "aac", "-movflags", "+faststart", "-t", "30"]));
     expect(args[args.indexOf("-fs") + 1]).toBe("1000");
     expect(args.join(" ")).toContain("scale=853:480:force_original_aspect_ratio=decrease:force_divisible_by=2");
+    expectEncoderThreadCap(args);
   });
 
   it("compact fails clearly when even the smallest rendition exceeds maxBytes", async () => {
@@ -270,10 +282,81 @@ describe("createFfmpeg (unit, execFile injected)", () => {
     expect(calls).toHaveLength(1);
   });
 
-  it("isAvailable is false when the binary cannot be spawned", async () => {
-    const { exec } = fakeExec("", Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" }));
+  it("isAvailable is false when the binary cannot be spawned, and that answer is kept", async () => {
+    const { exec, calls } = fakeExec("", Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" }));
     const ffmpeg = createFfmpeg({ execFile: exec, ffprobePath: "ffprobe", ffmpegPath: "/nonexistent/ffmpeg" });
+    expect(ffmpeg.lastKnownAvailability()).toBeUndefined();
     expect(await ffmpeg.isAvailable()).toBe(false);
+    expect(await ffmpeg.isAvailable()).toBe(false);
+    expect(calls).toHaveLength(1);
+    expect(ffmpeg.lastKnownAvailability()).toBe(false);
+  });
+
+  it("a probe killed on timeout is not remembered: after the cooldown the next call asks again and can succeed", async () => {
+    const calls: string[][] = [];
+    const exec: ExecFileFn = async (_bin, args) => {
+      calls.push([...args]);
+      if (calls.length === 1) throw Object.assign(new Error("killed"), { killed: true, signal: "SIGKILL" });
+      return { stdout: Buffer.from("ffmpeg version 8.1"), stderr: Buffer.alloc(0) };
+    };
+    let clock = 1_000_000;
+    const ffmpeg = createFfmpeg({ execFile: exec, ffprobePath: "ffprobe", ffmpegPath: "ffmpeg", now: () => clock });
+
+    expect(await ffmpeg.isAvailable()).toBe(false);
+    expect(ffmpeg.lastKnownAvailability()).toBeUndefined();
+
+    // Inside the cooldown: degraded answer, no new process.
+    expect(await ffmpeg.isAvailable()).toBe(false);
+    expect(calls).toHaveLength(1);
+
+    clock += 5_000;
+    expect(await ffmpeg.isAvailable()).toBe(true);
+    expect(ffmpeg.lastKnownAvailability()).toBe(true);
+    expect(await ffmpeg.isAvailable()).toBe(true);
+    expect(calls).toHaveLength(2);
+  });
+
+  it("a spawn refused for want of a resource is not remembered either, and retries once per cooldown", async () => {
+    let attempts = 0;
+    const exec: ExecFileFn = async () => {
+      attempts += 1;
+      if (attempts < 3) throw Object.assign(new Error("spawn EAGAIN"), { code: "EAGAIN" });
+      return { stdout: Buffer.from("ffmpeg version 8.1"), stderr: Buffer.alloc(0) };
+    };
+    let clock = 0;
+    const ffmpeg = createFfmpeg({ execFile: exec, ffprobePath: "ffprobe", ffmpegPath: "ffmpeg", now: () => clock });
+
+    for (let i = 0; i < 50; i += 1) expect(await ffmpeg.isAvailable()).toBe(false);
+    expect(attempts).toBe(1);
+
+    clock += 5_000;
+    for (let i = 0; i < 50; i += 1) expect(await ffmpeg.isAvailable()).toBe(false);
+    expect(attempts).toBe(2);
+
+    clock += 5_000;
+    expect(await ffmpeg.isAvailable()).toBe(true);
+    expect(attempts).toBe(3);
+    expect(ffmpeg.lastKnownAvailability()).toBe(true);
+  });
+
+  it("forwards a caller's timeout to the probe and defaults to 10 s otherwise", async () => {
+    const { exec, calls } = fakeExec("ffmpeg version 8.1");
+    const ffmpeg = createFfmpeg({ execFile: exec, ffprobePath: "ffprobe", ffmpegPath: "ffmpeg" });
+    await ffmpeg.isAvailable({ timeoutMs: 30_000 });
+    expect(calls[0].opts.timeout).toBe(30_000);
+
+    const plain = fakeExec("ffmpeg version 8.1");
+    const other = createFfmpeg({ execFile: plain.exec, ffprobePath: "ffprobe", ffmpegPath: "ffmpeg" });
+    await other.isAvailable();
+    expect(plain.calls[0].opts.timeout).toBe(10_000);
+  });
+
+  it("concurrent callers share one in-flight probe", async () => {
+    const { exec, calls } = fakeExec("ffmpeg version 8.1");
+    const ffmpeg = createFfmpeg({ execFile: exec, ffprobePath: "ffprobe", ffmpegPath: "ffmpeg" });
+    const results = await Promise.all([ffmpeg.isAvailable(), ffmpeg.isAvailable(), ffmpeg.isAvailable()]);
+    expect(results).toEqual([true, true, true]);
+    expect(calls).toHaveLength(1);
   });
 
   it("respects an AbortSignal by passing it to execFile", async () => {

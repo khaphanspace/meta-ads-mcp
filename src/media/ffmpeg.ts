@@ -29,10 +29,24 @@ const MAX_STREAMS = 4;
 const MAX_ALLOC_BYTES = 268435456;
 const DEFAULT_MAX_SECONDS = 240;
 const PROBE_TIMEOUT_MS = 20_000;
+const VERSION_PROBE_TIMEOUT_MS = 10_000;
+const VERSION_PROBE_RETRY_AFTER_MS = 5_000;
+// How long the one probe started at boot may run. On a fresh node the first
+// run of ffmpeg has taken over 10 s with CPU to spare, where a warm node
+// answers in about a second; the likeliest reason is that Cloud Run streams
+// image layers on demand and the first execution waits for the layer that
+// holds ffmpeg, which is probable but not confirmed. The transport does not
+// hold the port open for this long; it waits a bounded time and lets the
+// probe finish in the background.
+export const STARTUP_VERSION_PROBE_TIMEOUT_MS = 30_000;
 const FRAME_TIMEOUT_MS = 30_000;
 const TRANSCODE_TIMEOUT_MS = 150_000;
 const STDIO_MAX_BUFFER = 1024 * 1024;
 const FRAME_OUTPUT_CAP_BYTES = 4 * 1024 * 1024;
+// Output-side, so it binds the encoder. The -threads 1 in inputArgs sits
+// before -i and only bounds decoding; libx264 and the MJPEG encoder otherwise
+// size their own pools to the machine.
+const ENCODER_THREADS = ["-threads", "1"];
 const AUDIO_OUTPUT_CAP_BYTES = 8 * 1024 * 1024;
 
 export class VideoProbeError extends Error {
@@ -43,9 +57,15 @@ export class VideoProbeError extends Error {
 }
 
 export class FfmpegError extends Error {
-  constructor(message: string) {
+  // True when the failure says nothing about the binary itself: killed on
+  // timeout, or a spawn refused for want of a resource. Whoever is deciding
+  // whether ffmpeg exists must not remember such an answer.
+  readonly transient: boolean;
+
+  constructor(message: string, transient = false) {
     super(message);
     this.name = "FfmpegError";
+    this.transient = transient;
   }
 }
 
@@ -160,7 +180,9 @@ interface JobOptions {
 }
 
 export interface Ffmpeg {
-  isAvailable(): Promise<boolean>;
+  isAvailable(options?: { timeoutMs?: number }): Promise<boolean>;
+  /** The settled answer without spawning anything; undefined until a probe was conclusive. */
+  lastKnownAvailability(): boolean | undefined;
   probe(input: string, options?: { maxSeconds?: number; signal?: AbortSignal }): Promise<VideoProbe>;
   extractFrames(input: string, options: JobOptions & { count: number; maxWidth: number }): Promise<FrameExtraction[]>;
   contactSheet(input: string, options: JobOptions & { count: number; columns: number; tileWidth: number }): Promise<ContactSheet>;
@@ -172,6 +194,7 @@ export interface FfmpegConfig {
   execFile?: ExecFileFn;
   ffmpegPath?: string;
   ffprobePath?: string;
+  now?: () => number;
 }
 
 /** Evenly spaced sample points, each at the middle of its interval. */
@@ -200,9 +223,14 @@ function boundedScale(maxWidth: number, maxHeight: number): string {
   return `scale=${maxWidth}:${maxHeight}:force_original_aspect_ratio=decrease:force_divisible_by=2`;
 }
 
+// Spawn errors that mean the binary is not usable at all, as opposed to
+// EAGAIN, EMFILE or ENOMEM, which mean it could not be started just now.
+const DEFINITIVE_SPAWN_ERRORS = new Set(["ENOENT", "EACCES", "ENOEXEC"]);
+
 function describeFailure(tool: string, err: unknown): FfmpegError {
   const e = err as { code?: unknown; signal?: unknown; killed?: boolean; message?: string };
-  if (e?.killed || e?.signal === "SIGKILL") return new FfmpegError(`${tool} timed out and was killed`);
+  if (e?.killed || e?.signal === "SIGKILL") return new FfmpegError(`${tool} timed out and was killed`, true);
+  if (typeof e?.code === "string") return new FfmpegError(`${tool} failed (${e.code})`, !DEFINITIVE_SPAWN_ERRORS.has(e.code));
   const code = typeof e?.code === "number" ? ` (exit code ${e.code})` : "";
   // stderr can contain file paths; keep it out of user-facing text.
   return new FfmpegError(`${tool} failed${code}`);
@@ -212,7 +240,10 @@ export function createFfmpeg(config: FfmpegConfig = {}): Ffmpeg {
   const execFile = config.execFile ?? (nodeExecFileAsync as unknown as ExecFileFn);
   const ffmpegPath = config.ffmpegPath ?? "ffmpeg";
   const ffprobePath = config.ffprobePath ?? "ffprobe";
+  const now = config.now ?? Date.now;
   let available: Promise<boolean> | undefined;
+  let known: boolean | undefined;
+  let retryNotBefore = 0;
 
   const run = async (
     bin: string,
@@ -245,13 +276,38 @@ export function createFfmpeg(config: FfmpegConfig = {}): Ffmpeg {
   };
 
   return {
-    isAvailable() {
+    isAvailable(options = {}) {
       if (!available) {
-        available = run(ffmpegPath, ["-version"], { timeout: 10_000, tool: "ffmpeg" })
-          .then(() => true)
-          .catch(() => false);
+        // A transient failure is forgotten so a later call asks again. Two
+        // things have made the first probe on an instance slow: Cloud Run
+        // throttles the CPU once the port is open and no request is in
+        // flight, and, probably, it streams image layers on demand, so the
+        // first run of ffmpeg on a fresh node waits for its layer.
+        // Remembering either as "no ffmpeg" disabled every video tool on the
+        // instance for as long as it lived. The cooldown keeps an instance
+        // under pressure from spawning on every call: a refused spawn returns
+        // at once, unlike a timeout, and would otherwise retry without pause.
+        if (now() < retryNotBefore) return Promise.resolve(false);
+        available = run(ffmpegPath, ["-version"], { timeout: options.timeoutMs ?? VERSION_PROBE_TIMEOUT_MS, tool: "ffmpeg" })
+          .then(() => {
+            known = true;
+            return true;
+          })
+          .catch((err: unknown) => {
+            if (err instanceof FfmpegError && err.transient) {
+              available = undefined;
+              retryNotBefore = now() + VERSION_PROBE_RETRY_AFTER_MS;
+            } else {
+              known = false;
+            }
+            return false;
+          });
       }
       return available;
+    },
+
+    lastKnownAvailability() {
+      return known;
     },
 
     async probe(input, options = {}) {
@@ -283,6 +339,7 @@ export function createFfmpeg(config: FfmpegConfig = {}): Ffmpeg {
             ...inputArgs(options.demuxer),
             "-ss", String(timestamps[i]), "-i", input,
             "-frames:v", "1", "-vf", boundedScale(options.maxWidth, options.maxWidth), "-q:v", "4",
+            ...ENCODER_THREADS,
             "-fs", String(FRAME_OUTPUT_CAP_BYTES), "-f", "image2", out,
           ],
           { timeout: FRAME_TIMEOUT_MS, cwd: options.outDir, signal: options.signal, tool: "ffmpeg" },
@@ -305,6 +362,7 @@ export function createFfmpeg(config: FfmpegConfig = {}): Ffmpeg {
           "-ss", String(timestamps[0]), "-i", input,
           "-vf", `fps=1/${interval},${boundedScale(options.tileWidth, options.tileWidth)},tile=${columns}x${rows}:padding=4:margin=4:color=black`,
           "-frames:v", "1", "-q:v", "4",
+          ...ENCODER_THREADS,
           "-fs", String(FRAME_OUTPUT_CAP_BYTES * 2), "-f", "image2", out,
         ],
         { timeout: TRANSCODE_TIMEOUT_MS, cwd: options.outDir, signal: options.signal, tool: "ffmpeg" },
@@ -327,6 +385,7 @@ export function createFfmpeg(config: FfmpegConfig = {}): Ffmpeg {
             "-i", input, "-t", String(clipSeconds),
             "-vf", `${boundedScale(Math.round((rendition.height * 16) / 9), rendition.height)},fps=10`,
             "-c:v", "libx264", "-preset", "veryfast", "-crf", String(rendition.crf), "-pix_fmt", "yuv420p",
+            ...ENCODER_THREADS,
             "-c:a", "aac", "-b:a", "48k", "-ac", "1",
             "-movflags", "+faststart", "-fs", String(options.maxBytes), "-f", "mp4", out,
           ],

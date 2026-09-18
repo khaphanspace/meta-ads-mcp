@@ -19,9 +19,12 @@ import {
   CONNECTIONS_PATH,
   PAGE_STYLES,
   renderApifySection,
+  renderGeminiSection,
   userInitials,
 } from "./html-pages.js";
 import { getApifyTokenRepo } from "../store/apify-token-repo.js";
+import { getGeminiKeyRepo } from "../store/gemini-key-repo.js";
+import type { GeminiKeyStatus } from "../store/gemini-key-repo.js";
 import type { ApifyTokenStatus } from "../store/apify-token-repo.js";
 
 import { validateAuthorizeQuery } from "./authorize-validation.js";
@@ -49,7 +52,8 @@ import {
 import { isFirestoreEnabled } from "../store/firestore.js";
 import { logger } from "../utils/logger.js";
 import { unsafeIpReason } from "../utils/url-guard.js";
-import { getFfmpeg } from "../media/ffmpeg.js";
+import { STARTUP_VERSION_PROBE_TIMEOUT_MS, getFfmpeg } from "../media/ffmpeg.js";
+import { withDeadline } from "../utils/with-deadline.js";
 import { sweepStaleVideoDirs } from "../media/video-jobs.js";
 
 interface PendingAuth {
@@ -65,6 +69,9 @@ const UNKNOWN_APIFY_STATUS: ApifyTokenStatus = {
   apifyUsername: null,
   updatedAt: null,
 };
+
+/** Same degradation for the Gemini key: the section disappears, OAuth continues. */
+const UNKNOWN_GEMINI_STATUS: GeminiKeyStatus = { registered: false, keyFingerprint: null, updatedAt: null };
 
 function normalizeHostname(hostname: string): string {
   return hostname.startsWith("[") && hostname.endsWith("]")
@@ -122,6 +129,7 @@ interface ConsentContext {
   tokens: Awaited<ReturnType<typeof listTokens>>;
   activeName: string | null;
   apify: ApifyTokenStatus;
+  gemini: GeminiKeyStatus;
 }
 
 export function renderConsentPage(ctx: ConsentContext): string {
@@ -222,6 +230,8 @@ ${PAGE_STYLES}
     </details>
 
     ${renderApifySection({ status: ctx.apify, returnTo: fullPath, variant: "consent" })}
+
+    ${renderGeminiSection({ status: ctx.gemini, returnTo: fullPath, variant: "consent" })}
 
     <a class="manage-link" href="${CONNECTIONS_PATH}">Gestionar conexiones →</a>
 
@@ -481,18 +491,48 @@ export async function startHttpTransport(
     }
   }
 
-  // Probed once at startup; the health check must never spawn a process per request.
-  let ffmpegAvailable: boolean | undefined;
-  void getFfmpeg().isAvailable().then((available) => {
-    ffmpegAvailable = available;
-    logger.info({ ffmpeg_available: available }, available ? "ffmpeg detected; video keyframe extraction enabled" : "ffmpeg not found; video tools fall back to thumbnails");
-  });
+  // Started before the port opens, so it gets startup CPU, and waited for a
+  // bounded time only: with min-instances at zero, a request that caused
+  // this cold start is waiting on listen, and every second here is a second
+  // added to it. On a warm node the probe answers in about a second. On a
+  // fresh node the first run of ffmpeg has taken more than 10 s even with
+  // CPU, most likely because Cloud Run streams image layers on demand and
+  // the first execution waits for the layer that holds it. For that case
+  // the probe itself gets 30 s and is left to finish in the background
+  // after listen; it settles the answer when it completes, and if it ends
+  // inconclusively, killed at its timeout, the first video call re-probes
+  // after the cooldown. The health check reads the settled answer and never
+  // spawns a process per request.
+  const STARTUP_PROBE_WAIT_MS = 10_000;
+  const ffmpegRuntime = getFfmpeg();
+  const startupProbe = ffmpegRuntime.isAvailable({ timeoutMs: STARTUP_VERSION_PROBE_TIMEOUT_MS });
+  const logProbeOutcome = (phase: "at startup" | "after listen"): void => {
+    const known = ffmpegRuntime.lastKnownAvailability();
+    if (known === undefined) {
+      logger.warn(
+        { timeout_ms: STARTUP_VERSION_PROBE_TIMEOUT_MS, phase },
+        "ffmpeg startup probe was inconclusive (killed on timeout, or the spawn was refused for want of a resource); it will be retried on the first use after a short cooldown",
+      );
+    } else {
+      logger.info(
+        { ffmpeg_available: known, phase },
+        known ? "ffmpeg detected; video keyframe extraction enabled" : "ffmpeg not found; video tools fall back to thumbnails",
+      );
+    }
+  };
+  const waited = await withDeadline(startupProbe, STARTUP_PROBE_WAIT_MS);
+  if (waited.settled) {
+    logProbeOutcome("at startup");
+  } else {
+    logger.info({ waited_ms: STARTUP_PROBE_WAIT_MS }, "ffmpeg startup probe still running; opening the port and letting it finish in the background");
+    void startupProbe.then(() => logProbeOutcome("after listen"));
+  }
   void sweepStaleVideoDirs().then((removed) => {
     if (removed > 0) logger.info({ removed }, "Removed stale video scratch directories");
   });
 
   app.get("/health", (_req, res) => {
-    res.json(healthPayload({ ffmpeg: ffmpegAvailable }));
+    res.json(healthPayload({ ffmpeg: ffmpegRuntime.lastKnownAvailability() }));
   });
 
   if (config.multiTenantEnabled) {
@@ -503,6 +543,11 @@ export async function startHttpTransport(
     // third party.
     app.use(
       "/auth/register-apify-token",
+      createRateLimiter(10, 15 * 60 * 1000),
+    );
+    // Same reasoning for the Gemini key: each POST calls generativelanguage.googleapis.com.
+    app.use(
+      "/auth/register-gemini-key",
       createRateLimiter(10, 15 * 60 * 1000),
     );
 
@@ -554,11 +599,11 @@ export async function startHttpTransport(
         return;
       }
 
-      const [tokens, activeName, apify] = await Promise.all([
+      const [tokens, activeName, apify, gemini] = await Promise.all([
         listTokens(session.fbUserId),
         getDefaultTokenName(session.fbUserId),
-        // Apify is an optional add-on, so a failure reading its status must not
-        // take down OAuth approval. Degrade to "not connected" and log it.
+        // Apify and Gemini are optional add-ons, so a failure reading their
+        // status must not take down OAuth approval. Degrade to "not connected".
         getApifyTokenRepo()
           .getStatus(session.fbUserId)
           .catch((error: unknown) => {
@@ -571,6 +616,19 @@ export async function startHttpTransport(
               "Could not read Apify status; rendering consent without it",
             );
             return UNKNOWN_APIFY_STATUS;
+          }),
+        getGeminiKeyRepo()
+          .getStatus(session.fbUserId)
+          .catch((error: unknown) => {
+            logger.warn(
+              {
+                event: "gemini_status_unavailable",
+                fbUserId: hashPii(session.fbUserId),
+                error: error instanceof Error ? error.message : String(error),
+              },
+              "Could not read Gemini key status; rendering consent without it",
+            );
+            return UNKNOWN_GEMINI_STATUS;
           }),
       ]);
 
@@ -594,6 +652,7 @@ export async function startHttpTransport(
           tokens,
           activeName,
           apify,
+          gemini,
         }),
       );
     });

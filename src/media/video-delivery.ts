@@ -34,8 +34,28 @@ export type InlineQuality = "compact" | "original";
 const MB = 1024 * 1024;
 export const DEFAULT_MAX_INLINE_BYTES = 20 * MB;
 export const HTTP_MAX_INLINE_BYTES = 20 * MB;
-export const STDIO_MAX_INLINE_BYTES = 50 * MB;
+// The MCP SDK reads stdio through a buffer that, by default, closes the
+// transport on any single message above 10 MiB (STDIO_DEFAULT_MAX_BUFFER_SIZE,
+// since 1.30.0), on the client side too. The whole tool result has to fit
+// under it: base64 adds a third, and images, posters, frames and the JSON
+// all share the one message. 6 MiB of raw media leaves the rest as room.
+export const STDIO_MAX_INLINE_BYTES = 6 * MB;
+export const STDIO_RESPONSE_BYTES_BUDGET = 6 * MB;
 export const DEFAULT_VIDEO_TOTAL_BYTES_BUDGET = 30 * MB;
+
+function detectTransport(): "http" | "stdio" {
+  return isStdioTransport(process.argv) ? "stdio" : "http";
+}
+
+/**
+ * Raw media bytes one tool result may carry in total, images included. The
+ * tools that attach images before calling deliverVideos size their image
+ * budget from this too, so a composite response stays under the transport's
+ * message limit rather than only the video part of it.
+ */
+export function responseBytesBudget(transport: "http" | "stdio" = detectTransport()): number {
+  return transport === "stdio" ? STDIO_RESPONSE_BYTES_BUDGET : DEFAULT_VIDEO_TOTAL_BYTES_BUDGET;
+}
 const DEFAULT_MAX_VIDEOS = 3;
 const HARD_MAX_VIDEOS = 3;
 const DEFAULT_FRAME_COUNT = 6;
@@ -142,7 +162,7 @@ function publicErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-function looksLikeMp4(buffer: Buffer): boolean {
+export function looksLikeMp4(buffer: Buffer): boolean {
   // ISO BMFF: a size box followed by "ftyp" at byte 4.
   return buffer.length >= 12 && buffer.subarray(4, 8).toString("latin1") === "ftyp";
 }
@@ -178,12 +198,17 @@ export async function deliverVideos(
   const downloadImage = deps.downloadImage ?? downloadSafePublicImage;
   const ffmpeg = deps.ffmpeg ?? getFfmpeg();
   const runner = deps.runner ?? getVideoJobRunner();
-  const transport = deps.transport ?? (isStdioTransport(process.argv) ? "stdio" : "http");
+  const transport = deps.transport ?? detectTransport();
 
   const blocks: ContentBlock[] = [];
   const videos: DeliveredVideo[] = [];
   const warnings: string[] = [];
-  const budget: Budget = { total: limits.totalBytesBudget ?? DEFAULT_VIDEO_TOTAL_BYTES_BUDGET, used: 0 };
+  const ceiling = responseBytesBudget(transport);
+  const requestedBudget = limits.totalBytesBudget ?? ceiling;
+  const budget: Budget = {
+    total: transport === "stdio" ? Math.min(requestedBudget, ceiling) : requestedBudget,
+    used: 0,
+  };
 
   const maxVideos = Math.min(options.max_videos ?? DEFAULT_MAX_VIDEOS, HARD_MAX_VIDEOS);
   const selected = sources.slice(0, maxVideos);
@@ -268,10 +293,17 @@ export async function deliverVideos(
   if (needsPipeline) {
     ffmpegAvailable = await ffmpeg.isAvailable();
     if (!ffmpegAvailable) {
+      // false with no settled answer is a probe that did not complete, not a
+      // missing binary; the message must not send anyone to install it.
+      const missing = ffmpeg.lastKnownAvailability() === false;
+      const cause = missing
+        ? "ffmpeg is not installed on this server"
+        : "ffmpeg did not respond on this server just now and will be probed again after a short cooldown";
+      const hint = missing ? " Set FFMPEG_PATH or install ffmpeg to enable frame extraction." : "";
       warnings.push(
         options.delivery === "frames"
-          ? "ffmpeg is not installed on this server, so frames could not be extracted; falling back to thumbnails. Set FFMPEG_PATH or install ffmpeg to enable frame extraction."
-          : "ffmpeg is not installed on this server, so videos cannot be transcoded; inline delivery only works when the original file already fits max_inline_bytes.",
+          ? `${cause}, so frames could not be extracted; falling back to thumbnails.${hint}`
+          : `${cause}, so videos cannot be transcoded; inline delivery only works when the original file already fits max_inline_bytes.`,
       );
     }
   }

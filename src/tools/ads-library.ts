@@ -42,12 +42,13 @@ import { imageBlock, safeHostname, sanitizeMetadataUrl, textBlock, type ContentB
 import { assertAllowedVideoHost, resolveAllowedVideoHostSuffixes } from "../media/safe-video-download.js";
 import {
   deliverVideos as defaultDeliverVideos,
-  DEFAULT_VIDEO_TOTAL_BYTES_BUDGET,
+  responseBytesBudget,
   type DeliveredVideo,
   type VideoDeliveryDeps,
 } from "../media/video-delivery.js";
 import { describeDelivered } from "./video-media.js";
 import { boundedClone } from "../utils/bounded-json.js";
+import { singleLine } from "../utils/single-line.js";
 
 export { boundedClone };
 import { APIFY_WRITE_WARNING, DELETE, READ, TOKEN, TOGGLE, CREATE } from "./_register.js";
@@ -770,7 +771,7 @@ export function registerAdsLibraryTools(server: McpServer, deps: AdLibraryToolDe
             meta.error = err instanceof Error ? err.message : String(err);
             continue;
           }
-          const remaining = IMAGE_BYTES_BUDGET - imageBytes;
+          const remaining = Math.min(IMAGE_BYTES_BUDGET, responseBytesBudget(deps.transport)) - imageBytes;
           if (remaining <= 0) {
             meta.skipped = "size_budget";
             continue;
@@ -800,7 +801,7 @@ export function registerAdsLibraryTools(server: McpServer, deps: AdLibraryToolDe
           { delivery: video_delivery, frame_count, frame_layout: "grid" },
           deps,
           { tenantId: resolveApifyTenantId(), signal: extra?.signal },
-          { totalBytesBudget: Math.max(0, DEFAULT_VIDEO_TOTAL_BYTES_BUDGET - imageBytes) },
+          { totalBytesBudget: Math.max(0, responseBytesBudget(deps.transport) - imageBytes) },
         );
         const shift = 1 + imageBlocks.length;
         videoBlocks = delivery.blocks;
@@ -837,21 +838,8 @@ interface LibraryImageMeta {
   skipped?: "max_images" | "size_budget";
 }
 
-/** One line, control characters collapsed, bounded: advertiser text is data for the agent, never framing. */
-const CONTROL_CHARS = new RegExp("[\x00-\x1f\x7f]+", "g");
-const LINE_SEPARATORS = new RegExp("[" + String.fromCharCode(0x2028, 0x2029) + "]", "g");
-
-function line(value: string | null | undefined, max: number): string {
-  if (!value) return "";
-  // Sanitize a bounded prefix only: each replace over a multi-megabyte string
-  // would allocate another copy of it just for the slice below to discard.
-  const cut = value.length > max * 4;
-  const head = cut ? value.slice(0, max * 4) : value;
-  const flat = head.replace(CONTROL_CHARS, " ").replace(LINE_SEPARATORS, " ").replace(/\s+/g, " ").trim();
-  if (flat.length > max) return flat.slice(0, max) + "…";
-  // The prefix may have been all whitespace; say so rather than render an empty field.
-  return cut ? flat + "…" : flat;
-}
+/** Advertiser text is data for the agent, never framing: one bounded, control-character-free line. */
+const line = singleLine;
 
 function renderLibraryAdCard(ad: LibraryAd, images: LibraryImageMeta[], videos: DeliveredVideo[], videoDelivery: string, warnings: string[]): string {
   const lines: string[] = [];

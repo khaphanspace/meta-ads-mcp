@@ -23,14 +23,14 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4
         with:
           fetch-depth: 0
 
       - name: Setup Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
 
       - name: Install dependencies
@@ -72,7 +72,7 @@ jobs:
           echo "GITLEAKS_VERSION=$version" >> "$GITHUB_ENV"
 
       - name: Run gitleaks
-        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7  # v2
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e  # v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
@@ -89,7 +89,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4
 
       - name: Validate required production secrets
         env:
@@ -186,13 +186,13 @@ jobs:
 
       - name: Authenticate to Google Cloud
         id: auth
-        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed  # v2
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093  # v3.0.0
         with:
           workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
 
       - name: Set up Cloud SDK
-        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f  # v2
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db  # v3.0.1
 
       - name: Verify runtime service account exists
         env:
@@ -304,10 +304,10 @@ jobs:
         run: gcloud auth configure-docker "$GCP_REGION-docker.pkg.dev" --quiet
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003  # v4.4.0
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
         with:
           context: .
           push: true
@@ -319,14 +319,28 @@ jobs:
 
       - name: Deploy to Cloud Run
         id: deploy
-        uses: google-github-actions/deploy-cloudrun@251330ba9a8a34bfbc1622895f42e1d53fd14522  # v2
+        uses: google-github-actions/deploy-cloudrun@2028e2d7d30a78c6910e0632e48dd561b064884d  # v3.0.1
         with:
           service: ${{ env.SERVICE_NAME }}
           region: ${{ secrets.GCP_REGION }}
           image: ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/meta-ads-mcp/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          # --execution-environment must stay pinned to gen2 and must not be
+          # dropped. Left unset the platform chooses, and on 2026-09-17 that
+          # choice stopped being able to start this container at all with the
+          # in-memory /tmp volume below mounted: the instance was created,
+          # never opened the port and emitted no output, so three deploys in a
+          # row died on the 240s startup probe with nothing in the logs. The
+          # merged code is not what broke it: the last known good image failed
+          # identically when redeployed. Pinned to gen2 that same image starts
+          # and answers /health in under half a second. The root
+          # cause of the change in the unset behaviour is not established.
+          # Dropping the volume would also let it start, but the volume is
+          # what turns an oversize scratch write into ENOSPC instead of a dead
+          # instance, so it stays.
           flags: >-
             --allow-unauthenticated
             --service-account=${{ secrets.GCP_RUNTIME_SERVICE_ACCOUNT }}
+            --execution-environment=gen2
             --memory=2Gi
             --cpu=2
             --concurrency=40
@@ -342,6 +356,7 @@ jobs:
             NODE_ENV=production
             NODE_OPTIONS=--max-old-space-size=1536
             VIDEO_MAX_CONCURRENT_JOBS=2
+            GEMINI_ANALYSES_PER_TENANT_PER_HOUR=20
             META_APP_ID=${{ secrets.META_APP_ID }}
             SERVER_URL=${{ secrets.SERVER_URL }}
             AUTH_ALLOWED_EMAILS=${{ secrets.AUTH_ALLOWED_EMAILS }}
@@ -411,7 +426,7 @@ jobs:
       prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
       - name: Checkout deployed SHA
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4
         with:
           ref: ${{ github.sha }}    # match the commit the deploy job validated
           fetch-depth: 0            # full history needed for --generate-notes
@@ -467,6 +482,31 @@ jobs:
           gh release create "${ARGS[@]}"
           echo "created=true" >> "$GITHUB_OUTPUT"
           echo "Released $TAG at $DEPLOYED_SHA. The follow-up publish job will ship npm + ghcr artifacts."
+
+      # Context7 indexes this repository's documentation for coding agents
+      # (context7.com/byadsco/meta-ads-mcp); it re-reads it on its own schedule
+      # and immediately when asked. Asked on every push to main, so a docs-only
+      # merge refreshes the index too. Needs an owner API key stored as the
+      # CONTEXT7_API_KEY secret; without it the step says so and exits 0.
+      # continue-on-error keeps a Context7 outage from failing this job,
+      # which would block the publish job that depends on it.
+      - name: Refresh Context7 index
+        continue-on-error: true
+        env:
+          CONTEXT7_API_KEY: ${{ secrets.CONTEXT7_API_KEY }}
+        run: |
+          set -eu
+          if [ -z "${CONTEXT7_API_KEY}" ]; then
+            echo "CONTEXT7_API_KEY is not set; skipping the Context7 refresh."
+            exit 0
+          fi
+          curl --fail --silent --show-error --max-time 30 \
+            -X POST https://context7.com/api/v1/refresh \
+            -H "Authorization: Bearer ${CONTEXT7_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d '{"libraryName":"/byadsco/meta-ads-mcp"}'
+          echo
+          echo "Context7 refresh requested."
 
   publish:
     # Trigger publish.yml explicitly via workflow_call. We can't rely on the
